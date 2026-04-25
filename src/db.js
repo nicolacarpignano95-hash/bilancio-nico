@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════
-// FIREBASE DB LAYER — bilancio-nico
+// FIREBASE DB LAYER — bilancio-nico  v2.0
 // ═══════════════════════════════════════════════════
 import { initializeApp } from 'firebase/app';
 import {
@@ -22,10 +22,8 @@ const firebaseConfig = {
 };
 
 const firebaseApp = initializeApp(firebaseConfig);
-const db = getFirestore(firebaseApp);
+const db          = getFirestore(firebaseApp);
 
-// Abilita persistenza offline nativa di Firestore (IndexedDB)
-// Quando sei offline, i dati restano disponibili e si sincronizzano al ritorno online
 enableIndexedDbPersistence(db).catch(err => {
   if (err.code === 'failed-precondition') {
     console.warn('[DB] Persistenza offline non attivata: più tab aperte');
@@ -41,45 +39,54 @@ let _ignoreNextSnapshot = false;
 let _unsubscribe        = null;
 let _reconnectTimer     = null;
 let _initialState       = null;
+let _listenerActive     = false;
 
-// ── Listener con riconnessione automatica ──
-function startListener() {
+// ════════════════════════════════════════════════════════
+// ① LISTENER UNICO E CONTROLLATO
+//    startListener() è idempotente: se il listener è già
+//    attivo non lo duplica. Solo forceRestart=true (usato
+//    su errore o ritorno online) abbatte e ricrea.
+// ════════════════════════════════════════════════════════
+function startListener(forceRestart = false) {
+  if (_listenerActive && !forceRestart) return;
+
   if (_unsubscribe) { _unsubscribe(); _unsubscribe = null; }
+  _listenerActive = false;
 
   _unsubscribe = onSnapshot(
     STATE_DOC,
     { includeMetadataChanges: true },
     (snap) => {
-      const isFromCache    = snap.metadata.fromCache;
-      const hasPendingWrites = snap.metadata.hasPendingWrites;
+      _listenerActive = true;
+      const { hasPendingWrites, fromCache } = snap.metadata;
 
-      // fromCache=true e nessuna scrittura in sospeso = offline
-      if (isFromCache && !hasPendingWrites) {
-        showOfflineBanner(true);
-      } else {
-        showOfflineBanner(false);
-      }
+      const isReallyOffline = !navigator.onLine && fromCache && !hasPendingWrites;
+
+      if      (hasPendingWrites) setBannerState('syncing');
+      else if (isReallyOffline)  setBannerState('offline');
+      else                       setBannerState('online');
 
       if (_ignoreNextSnapshot) { _ignoreNextSnapshot = false; return; }
-      // Notifica solo dati confermati dal server (non pending)
       if (snap.exists() && _onRemoteUpdate && !hasPendingWrites) {
         _onRemoteUpdate(mergeState(_initialState, snap.data()));
       }
     },
     (err) => {
+      _listenerActive = false;
       console.warn('[DB] Snapshot error:', err.code, err.message);
-      showOfflineBanner(true);
-      // Riprova dopo 5 secondi
+      if (!navigator.onLine) setBannerState('offline');
       clearTimeout(_reconnectTimer);
       _reconnectTimer = setTimeout(() => {
         console.log('[DB] Tentativo riconnessione...');
-        startListener();
+        startListener(true);
       }, 5000);
     }
   );
 }
 
-// ── initDB ──
+// ════════════════════════════════════════════════════════
+// initDB
+// ════════════════════════════════════════════════════════
 export async function initDB(initialState, onUpdate) {
   _onRemoteUpdate = onUpdate;
   _initialState   = initialState;
@@ -91,23 +98,22 @@ export async function initDB(initialState, onUpdate) {
     if (snap.exists()) {
       startState = mergeState(initialState, snap.data());
       console.log('[DB] Stato caricato da Firestore');
-      showOfflineBanner(false);
+      setBannerState('online');
     } else {
-      // Prima volta: migra da localStorage se esiste
       const local = localStorage.getItem('bilancio_nico_v3');
       if (local) {
         try {
           startState = mergeState(initialState, JSON.parse(local));
           await setDoc(STATE_DOC, sanitize(startState));
           console.log('[DB] Migrato da localStorage → Firestore');
-          showOfflineBanner(false);
+          setBannerState('online');
         } catch (e) {
           console.warn('[DB] Errore migrazione:', e);
         }
       } else {
         await setDoc(STATE_DOC, sanitize(startState));
         console.log('[DB] Documento Firestore creato');
-        showOfflineBanner(false);
+        setBannerState('online');
       }
     }
   } catch (e) {
@@ -116,28 +122,59 @@ export async function initDB(initialState, onUpdate) {
     if (local) {
       try { startState = mergeState(initialState, JSON.parse(local)); } catch (_) {}
     }
+    setBannerState('offline');
   }
 
   startListener();
+
+  // "online"  → forceRestart per ristabilire il canale Firestore
+  // "offline" → aggiorna solo il banner, il listener non va toccato
+  window.addEventListener('online',  () => { setBannerState('syncing'); startListener(true); });
+  window.addEventListener('offline', () => setBannerState('offline'));
+
   return startState;
 }
 
-// ── saveState con debounce 1s ──
-let _saveTimer = null;
+// ════════════════════════════════════════════════════════
+// ③ SALVATAGGI INTELLIGENTI
+//    Confronta un hash leggero del nuovo state con l'ultimo
+//    salvato. Se identico → salta setDoc (niente scrittura
+//    inutile su Firestore). localStorage viene sempre
+//    aggiornato perché è locale e non ha costi.
+// ════════════════════════════════════════════════════════
+let _saveTimer     = null;
+let _lastSavedHash = null;
+
 export function saveState(state) {
   try { localStorage.setItem('bilancio_nico_v3', JSON.stringify(state)); } catch (_) {}
 
   clearTimeout(_saveTimer);
   _saveTimer = setTimeout(async () => {
+    const hash = _hashState(state);
+    if (hash === _lastSavedHash) return; // nulla è cambiato → skip
+
     try {
+      _lastSavedHash      = hash;
       _ignoreNextSnapshot = true;
+      setBannerState('syncing');
       await setDoc(STATE_DOC, sanitize(state));
-      showOfflineBanner(false);
+      setBannerState('online');
     } catch (e) {
       console.warn('[DB] Errore salvataggio:', e.message);
-      // IndexedDB salverà e sincronizzerà quando torna online
+      _lastSavedHash = null; // forza retry al prossimo save
+      if (!navigator.onLine) setBannerState('offline');
     }
   }, 1000);
+}
+
+// Hash leggero senza dipendenze esterne
+function _hashState(state) {
+  const s = JSON.stringify(state);
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  }
+  return `${s.length}_${h}`;
 }
 
 // ── Helpers ──
@@ -172,34 +209,63 @@ function _uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
 
-// ── Banner offline/online ──
-// Appare solo dopo 3s di offline, sparisce dopo 2s di ritorno online
-let _banner      = null;
-let _bannerTimer = null;
+// ════════════════════════════════════════════════════════
+// ② BANNER A 3 STATI CON DEBOUNCE
+//    - debounce 800ms: ignora micro-flap di rete
+//    - non ridisegna se lo stato è già quello corrente
+//    - 🟢 online  → sparisce con fade dopo 2s
+//    - 🟡 syncing / 🔴 offline → restano fino al cambio di stato
+// ════════════════════════════════════════════════════════
+const BANNER_CFG = {
+  offline: { bg: '#ef4444', color: '#fff', text: '🔴 Offline — dati salvati, sincronizzerò al ritorno' },
+  syncing: { bg: '#f59e0b', color: '#000', text: '🟡 Sincronizzazione in corso…' },
+  online:  { bg: '#10b981', color: '#fff', text: '🟢 Sincronizzato' },
+};
 
-function showOfflineBanner(show) {
-  if (show) {
-    if (_banner || _bannerTimer) return;
-    _bannerTimer = setTimeout(() => {
-      if (_banner) return;
-      _banner = document.createElement('div');
-      _banner.style.cssText = `
-        position:fixed;top:0;left:0;right:0;z-index:9999;
-        background:#f59e0b;color:#000;text-align:center;
-        font-size:12px;font-weight:700;padding:6px;letter-spacing:.3px;
-      `;
-      _banner.textContent = '📶 Offline — dati salvati localmente, sincronizzazione in attesa';
-      document.body.prepend(_banner);
-      _bannerTimer = null;
-    }, 3000);
-  } else {
-    clearTimeout(_bannerTimer);
-    _bannerTimer = null;
-    if (_banner) {
-      _banner.textContent = '✓ Sincronizzato con Firebase';
-      _banner.style.background = '#10b981';
-      _banner.style.color = '#fff';
-      setTimeout(() => { _banner?.remove(); _banner = null; }, 2000);
-    }
+let _banner        = null;
+let _currentBanner = null;
+let _debounceTimer = null;
+let _hideTimer     = null;
+
+function setBannerState(newState) {
+  clearTimeout(_debounceTimer);
+  _debounceTimer = setTimeout(() => _applyBanner(newState), 800);
+}
+
+function _applyBanner(newState) {
+  if (_currentBanner === newState) return; // già mostrato, skip
+  _currentBanner = newState;
+  clearTimeout(_hideTimer);
+
+  const cfg = BANNER_CFG[newState];
+  if (!cfg) return;
+
+  if (!_banner) {
+    _banner = document.createElement('div');
+    _banner.style.cssText = `
+      position:fixed;top:0;left:0;right:0;z-index:9999;
+      text-align:center;font-size:12px;font-weight:700;
+      padding:6px;letter-spacing:.3px;
+      transition:background .4s,opacity .35s;
+    `;
+    document.body.prepend(_banner);
+  }
+
+  _banner.style.background = cfg.bg;
+  _banner.style.color      = cfg.color;
+  _banner.textContent      = cfg.text;
+  _banner.style.opacity    = '1';
+  _banner.style.display    = 'block';
+
+  if (newState === 'online') {
+    _hideTimer = setTimeout(() => {
+      if (_banner) {
+        _banner.style.opacity = '0';
+        setTimeout(() => {
+          if (_banner) _banner.style.display = 'none';
+          _currentBanner = null; // reset: il prossimo "online" riappare
+        }, 380);
+      }
+    }, 2000);
   }
 }

@@ -1,0 +1,6 @@
+{
+  "name": "Bilancio Nico",
+  "description": "App mobile-first per gestire Nico e Inlab: spese, incassi, tasse, patrimonio, investimenti e prestiti.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

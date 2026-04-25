@@ -1,0 +1,19 @@
+{
+  "name": "bilancio-nico",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Web app mobile-first per la gestione quotidiana di Nico e Inlab.",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.mjs",
+    "start": "node server.mjs",
+    "build": "echo 'No build step required'",
+    "lint": "echo 'No lint step configured'"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "chart.js": "^4.5.1"
+  }
+}

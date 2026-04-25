@@ -1,0 +1,86 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(data) {
+      return isSignedIn() && data.userId == request.auth.uid;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Helper for data validation
+    function isValidMovement(data) {
+      return data.keys().hasAll(['type', 'area', 'date', 'amount', 'userId']) &&
+             data.type in ['income', 'expense'] &&
+             data.area in ['nico', 'inlab'] &&
+             data.amount is number &&
+             data.userId == request.auth.uid;
+    }
+
+    function isValidInvestment(data) {
+      return data.keys().hasAll(['name', 'category', 'initialValue', 'currentValue', 'userId']) &&
+             data.initialValue is number &&
+             data.currentValue is number &&
+             data.userId == request.auth.uid;
+    }
+
+    function isValidIncrement(data) {
+      return data.keys().hasAll(['investmentId', 'date', 'amount', 'userId']) &&
+             data.amount is number &&
+             data.userId == request.auth.uid;
+    }
+
+    function isValidLoan(data) {
+      return data.keys().hasAll(['name', 'initialAmount', 'residualAmount', 'userId']) &&
+             data.initialAmount is number &&
+             data.residualAmount is number &&
+             data.userId == request.auth.uid;
+    }
+
+    function isValidTax(data) {
+      return data.keys().hasAll(['date', 'amount', 'status', 'userId']) &&
+             data.amount is number &&
+             data.status in ['accantonata', 'pagata', 'da pagare'] &&
+             data.userId == request.auth.uid;
+    }
+
+    // Public access for demo purposes (as requested to remove login)
+    match /movements/{movementId} {
+      allow read, write: if true;
+    }
+
+    match /investments/{investmentId} {
+      allow read, write: if true;
+
+      match /increments/{incrementId} {
+        allow read, write: if true;
+      }
+    }
+
+    match /loans/{loanId} {
+      allow read, write: if true;
+    }
+
+    match /taxes/{taxId} {
+      allow read, write: if true;
+    }
+  }
+}

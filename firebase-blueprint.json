@@ -1,0 +1,112 @@
+{
+  "entities": {
+    "Movement": {
+      "title": "Movement",
+      "description": "A financial movement (income or expense) for Nico or Inlab.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "area": { "type": "string", "enum": ["nico", "inlab"] },
+        "date": { "type": "string", "format": "date-time" },
+        "amount": { "type": "number" },
+        "grossAmount": { "type": "number" },
+        "taxAmount": { "type": "number" },
+        "netAmount": { "type": "number" },
+        "description": { "type": "string" },
+        "category": { "type": "string" },
+        "paymentMethod": { "type": "string", "enum": ["contanti", "fatt"] },
+        "account": { "type": "string" },
+        "collectedBy": { "type": "string", "enum": ["nico", "ilaria"] },
+        "givenToPartner": { "type": "number" },
+        "notes": { "type": "string" },
+        "client": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["type", "area", "date", "amount", "userId"]
+    },
+    "Investment": {
+      "title": "Investment",
+      "description": "An investment asset for Nico.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "category": { "type": "string" },
+        "platform": { "type": "string" },
+        "initialValue": { "type": "number", "description": "Value on Jan 1st" },
+        "currentValue": { "type": "number" },
+        "userId": { "type": "string" }
+      },
+      "required": ["name", "category", "initialValue", "currentValue", "userId"]
+    },
+    "InvestmentIncrement": {
+      "title": "InvestmentIncrement",
+      "description": "A contribution made to an investment.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "investmentId": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "amount": { "type": "number" },
+        "notes": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["investmentId", "date", "amount", "userId"]
+    },
+    "Loan": {
+      "title": "Loan",
+      "description": "A loan or debt.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "initialAmount": { "type": "number" },
+        "residualAmount": { "type": "number" },
+        "installment": { "type": "number" },
+        "startDate": { "type": "string", "format": "date-time" },
+        "area": { "type": "string", "enum": ["nico", "inlab"] },
+        "notes": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["name", "initialAmount", "residualAmount", "userId"]
+    },
+    "Tax": {
+      "title": "Tax",
+      "description": "Tax entries for Nico.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "origin": { "type": "string" },
+        "amount": { "type": "number" },
+        "status": { "type": "string", "enum": ["accantonata", "pagata", "da pagare"] },
+        "notes": { "type": "string" },
+        "userId": { "type": "string" }
+      },
+      "required": ["date", "amount", "status", "userId"]
+    }
+  },
+  "firestore": {
+    "/movements/{movementId}": {
+      "schema": "Movement",
+      "description": "Collection of all financial movements."
+    },
+    "/investments/{investmentId}": {
+      "schema": "Investment",
+      "description": "Collection of investment assets."
+    },
+    "/investments/{investmentId}/increments/{incrementId}": {
+      "schema": "InvestmentIncrement",
+      "description": "Collection of increments for a specific investment."
+    },
+    "/loans/{loanId}": {
+      "schema": "Loan",
+      "description": "Collection of loans."
+    },
+    "/taxes/{taxId}": {
+      "schema": "Tax",
+      "description": "Collection of tax entries."
+    }
+  }
+}

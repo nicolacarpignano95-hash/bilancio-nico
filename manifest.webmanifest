@@ -1,0 +1,10 @@
+{
+  "name": "Bilancio Nico",
+  "short_name": "Bilancio",
+  "lang": "it",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f7f6f1",
+  "theme_color": "#0f172a",
+  "description": "Gestione quotidiana di spese, incassi, tasse, patrimonio, investimenti e prestiti per Nico e Inlab."
+}

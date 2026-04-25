@@ -1,8 +1,8 @@
 // ═══════════════════════════════════════════════════
 // BILANCIO NICO v3 — FULL REWRITE
 // ═══════════════════════════════════════════════════
-const Chart = window.Chart;
-const STORAGE_KEY = 'bilancio_nico_v3';
+import Chart from 'chart.js/auto';
+import { initDB, saveState as dbSave } from './db.js';
 
 let state = {
   transactions: [],
@@ -73,25 +73,7 @@ const getPeriodLabel = () => {
   return `${MONTHS[month-1]} ${year}`;
 };
 
-const saveState = () => localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-const loadState = () => {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if(!raw) return;
-  const saved = JSON.parse(raw);
-  state = {...state, ...saved};
-  // Migrazione: Assicura ID per tutti per permettere cancellazione
-  state.transactions.forEach(t => { if(!t.id) t.id = uid(); });
-  state.clients.forEach(c => { if(!c.id) c.id = uid(); });
-  state.assets.liquid.forEach(a => { if(!a.id) a.id = uid(); });
-  state.assets.invest.forEach(a => { if(!a.id) a.id = uid(); });
-
-  if(!state.assets)            state.assets = {liquidInitial:0,liquid:[],invest:[]};
-  if(!state.assets.liquid)     state.assets.liquid = [];
-  if(!state.assets.invest)     state.assets.invest = [];
-  if(!state.taxPayments)       state.taxPayments = {};
-  if(!state.expenseCategories) state.expenseCategories = ['Necessità','Extra','Lavoro','Viaggi','Cibo','Salute','Casa','Abbonamenti'];
-  if(!state.clientFilters) state.clientFilters = { clientSearch:'', clientArea:'all', clientPay:'all' };
-};
+const saveState = () => dbSave(state);
 
 // ═══════════════════════════════════════════════════
 // ASSET HELPERS
@@ -2019,8 +2001,25 @@ window.render=render;
 // ═══════════════════════════════════════════════════
 // BOOT
 // ═══════════════════════════════════════════════════
-window.addEventListener('DOMContentLoaded',()=>{
-  loadState();
+window.addEventListener('DOMContentLoaded', async () => {
+  // Schermata di caricamento
+  app.innerHTML = `
+    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
+                height:100vh;gap:16px;background:#0a0a0a;">
+      <div style="font-size:36px;">💸</div>
+      <div style="font-size:14px;color:#555;font-weight:600;font-family:sans-serif;letter-spacing:.5px;">
+        Caricamento dati...
+      </div>
+    </div>`;
+
+  // Carica state da Firestore (con fallback localStorage)
+  state = await initDB(state, (remoteState) => {
+    // Callback: aggiornamento da altro dispositivo
+    state = remoteState;
+    runPacSync();
+    render(lastViewId);
+  });
+
   runPacSync();
   render('home');
 });

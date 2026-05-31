@@ -198,9 +198,7 @@ h1, h2, h3, .sora { font-family: 'Sora', sans-serif; }
 ═══════════════════════════════════════ */
 .page {
   padding: 28px;
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
+  min-height: 100%;
 }
 
 .page-header {

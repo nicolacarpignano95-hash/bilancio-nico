@@ -483,135 +483,157 @@ const renderHomeView = (slot) => {
   const liq=getLiquidTotal();
   const inv=getInvestTotal();
 
-  // Ultimi 5 movimenti ordinati per data desc
+  // Ultimi 5 movimenti ordinati per data desc, con amount > 0
   const recentTx = [...state.transactions]
+    .filter(tx => tx.amount > 0)
     .sort((a,b)=>(b.date||'').localeCompare(a.date||''))
     .slice(0,5);
 
+  const catIcon = cat => {
+    const map = {
+      'Necessità':'🏠','Extra':'🛍️','Lavoro':'💼','Viaggi':'✈️',
+      'Cibo':'🍽️','Salute':'💊','Casa':'🏡','Abbonamenti':'📱',
+      'Stipendio':'💰','Freelance':'🧑‍💻','Inlab':'🏢','Affitto':'🏠',
+      'default':'💳'
+    };
+    return map[cat] || map['default'];
+  };
+
   const recentHtml = recentTx.length ? recentTx.map(tx=>{
     const isInc = tx.kind==='income';
-    const area = tx.area==='inlab' ? '<span style="font-size:9px;font-weight:800;background:#f3f4f6;color:#6b7280;border-radius:4px;padding:1px 5px;margin-left:4px;">INLAB</span>' : '';
-    return `<div class="tx-item">
-      <div class="tx-dot" style="background:${isInc?'var(--green)':'var(--red)'}"></div>
-      <div class="tx-info">
-        <div class="tx-label">${esc(tx.label||tx.category||'—')}${area}</div>
-        <div class="tx-meta">${tx.date ? new Date(tx.date).toLocaleDateString('it-IT',{day:'2-digit',month:'short'}) : '—'}${tx.category?' · '+esc(tx.category):''}</div>
+    const icon = catIcon(tx.category);
+    const area = tx.area==='inlab' ? `<span style="font-size:9px;font-weight:700;background:#f0f0f0;color:#888;border-radius:3px;padding:1px 4px;margin-left:5px;letter-spacing:.04em;">INLAB</span>` : '';
+    const dateStr = tx.date ? new Date(tx.date).toLocaleDateString('it-IT',{day:'2-digit',month:'short'}) : '—';
+    return `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(0,0,0,0.05);">
+      <div style="width:36px;height:36px;border-radius:10px;background:${isInc?'#f0faf5':'#fef2f2'};display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">${icon}</div>
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:13px;font-weight:700;color:#111;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tx.label||tx.category||'—')}${area}</div>
+        <div style="font-size:11px;color:#9ca3af;margin-top:1px;">${dateStr}${tx.category?' · '+esc(tx.category):''}</div>
       </div>
-      <div class="tx-amount ${isInc?'pos':'neg'}">${isInc?'+':'−'}${fmt(Math.abs(tx.amount||0))}</div>
+      <div style="font-family:'Sora';font-size:14px;font-weight:800;color:${isInc?'#059669':'#dc2626'};flex-shrink:0;">${isInc?'+':'−'}${fmt(Math.abs(tx.amount||0))}</div>
     </div>`;
-  }).join('') : `<div style="text-align:center;padding:24px 0;font-size:12px;font-weight:700;color:var(--muted);">Nessun movimento</div>`;
+  }).join('') : `<div style="text-align:center;padding:24px 0;font-size:12px;font-weight:700;color:#9ca3af;">Nessun movimento</div>`;
 
   renderPeriodSelectors('Dashboard');
-  slot.innerHTML=`<div class="page fade-up">
+  slot.innerHTML=`<div class="page fade-up" style="padding:24px 28px;">
 
     <!-- Header -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;">
       <div>
-        <div style="font-family:'Sora';font-size:22px;font-weight:800;letter-spacing:-0.03em;color:#000;">Panoramica</div>
-        <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px;">${getPeriodLabel()}</div>
+        <div style="font-family:'Sora';font-size:24px;font-weight:800;letter-spacing:-0.04em;color:#000;">Panoramica</div>
+        <div style="font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.12em;margin-top:3px;">${getPeriodLabel()}</div>
       </div>
       <div style="display:flex;gap:8px;">
-        <button class="btn-primary" onclick="window.openIncomeModal()">＋ Entrata</button>
-        <button class="btn-ghost" onclick="window.openExpenseModal()">－ Uscita</button>
+        <button class="btn-primary" onclick="window.openIncomeModal()" style="gap:6px;padding:10px 18px;">＋ Entrata</button>
+        <button class="btn-ghost" onclick="window.openExpenseModal()" style="padding:10px 18px;">－ Uscita</button>
       </div>
     </div>
 
-    <!-- 4 KPI cards -->
-    <div class="grid-4" style="margin-bottom:20px;">
-      <div class="kpi-card" style="border-left:3px solid #000;cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('nico')">
-        <div class="kpi-label">Netto Nico</div>
-        <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'}">${fmt(net)}</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-          <div class="kpi-delta" style="color:${net>=0?'var(--green)':'var(--red)'};">${net>=0?'↑':'↓'} ${fmt(inc)} entrate</div>
-          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+    <!-- Hero KPI row -->
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
+
+      <!-- Netto Nico — hero card -->
+      <div onclick="window.render('nico')" style="cursor:pointer;background:${net>=0?'#f0fdf4':'#fff1f2'};border:1.5px solid ${net>=0?'#bbf7d0':'#fecdd3'};border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
+        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:${net>=0?'#16a34a':'#dc2626'};margin-bottom:10px;">Netto Nico</div>
+        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:${net>=0?'#15803d':'#b91c1c'};line-height:1;">${fmt(net)}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid ${net>=0?'#bbf7d0':'#fecdd3'};display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-size:11px;font-weight:700;color:${net>=0?'#16a34a':'#dc2626'};">${net>=0?'↑':'↓'} ${fmt(inc)} entr.</div>
+          <div style="font-size:10px;color:#9ca3af;font-weight:700;">↗ Dettaglio</div>
         </div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid #6b7280;cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('inlab')">
-        <div class="kpi-label">Giro Inlab</div>
-        <div class="kpi-val">${fmt(inlab)}</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-          <div class="kpi-delta">Quota Nico: ${fmt(bal.nicoShare)}</div>
-          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+
+      <!-- Inlab -->
+      <div onclick="window.render('inlab')" style="cursor:pointer;background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
+        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#6b7280;margin-bottom:10px;">Giro Inlab</div>
+        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:#111;line-height:1;">${fmt(inlab)}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,0.06);display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-size:11px;font-weight:700;color:#6b7280;">Quota: ${fmt(bal.nicoShare)}</div>
+          <div style="font-size:10px;color:#9ca3af;font-weight:700;">↗ Dettaglio</div>
         </div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('assets')">
-        <div class="kpi-label">Patrimonio</div>
-        <div class="kpi-val">${fmt(tot)}</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-          <div class="kpi-delta"><span style="color:var(--green);">${fmt(liq)}</span> liq · <span style="color:#374151;">${fmt(inv)}</span> inv</div>
-          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+
+      <!-- Patrimonio -->
+      <div onclick="window.render('assets')" style="cursor:pointer;background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
+        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#059669;margin-bottom:10px;">Patrimonio</div>
+        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:#111;line-height:1;">${fmt(tot)}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,0.06);display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-size:11px;font-weight:700;color:#059669;">${fmt(liq)} liq</div>
+          <div style="font-size:11px;font-weight:700;color:#374151;">${fmt(inv)} inv</div>
         </div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--amber);cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('taxes')">
-        <div class="kpi-label">Stipendio stimato</div>
-        <div class="kpi-val">${fmt(stipendio)}</div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
-          <div class="kpi-delta">Clienti attivi × quota</div>
-          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+
+      <!-- Stipendio stimato -->
+      <div onclick="window.render('taxes')" style="cursor:pointer;background:#fffbeb;border:1.5px solid #fde68a;border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
+        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#d97706;margin-bottom:10px;">Stipendio stimato</div>
+        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:#92400e;line-height:1;">${fmt(stipendio)}</div>
+        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #fde68a;display:flex;justify-content:space-between;align-items:center;">
+          <div style="font-size:11px;font-weight:700;color:#d97706;">Clienti attivi × quota</div>
+          <div style="font-size:10px;color:#9ca3af;font-weight:700;">↗</div>
         </div>
       </div>
     </div>
 
-    <!-- Two columns: grafico + pannello destro -->
+    <!-- Bottom: grafico + pannello destro -->
     <div style="display:grid;grid-template-columns:1fr 340px;gap:16px;">
 
       <!-- Grafico entrate/uscite -->
-      <div class="card" style="padding:20px;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+      <div style="background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:24px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
           <div>
-            <div class="card-title">Entrate vs uscite — ultimi 6 mesi</div>
-            <div style="display:flex;gap:14px;margin-top:6px;">
-              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
-                <span style="width:8px;height:8px;border-radius:2px;background:var(--green);display:inline-block;"></span>Entrate
+            <div style="font-size:13px;font-weight:800;color:#111;letter-spacing:-0.01em;">Entrate vs Uscite</div>
+            <div style="font-size:11px;color:#9ca3af;font-weight:600;margin-top:2px;">Ultimi 6 mesi</div>
+            <div style="display:flex;gap:12px;margin-top:8px;">
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#9ca3af;">
+                <span style="width:10px;height:10px;border-radius:3px;background:#10b981;display:inline-block;"></span>Entrate
               </div>
-              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
-                <span style="width:8px;height:8px;border-radius:2px;background:var(--red);display:inline-block;"></span>Uscite
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#9ca3af;">
+                <span style="width:10px;height:10px;border-radius:3px;background:#f87171;display:inline-block;"></span>Uscite
               </div>
             </div>
           </div>
-          <div style="text-align:right;">
-            <div style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;">Questo mese</div>
-            <div style="font-family:'Sora';font-size:22px;font-weight:800;color:${net>=0?'var(--green)':'var(--red)'};">${fmt(net)}</div>
+          <div style="text-align:right;background:${net>=0?'#f0fdf4':'#fff1f2'};border-radius:12px;padding:10px 14px;">
+            <div style="font-size:9px;font-weight:800;color:${net>=0?'#16a34a':'#dc2626'};text-transform:uppercase;letter-spacing:.1em;">Saldo mese</div>
+            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:${net>=0?'#15803d':'#b91c1c'};margin-top:2px;">${fmt(net)}</div>
           </div>
         </div>
-        <div style="display:flex;align-items:flex-end;gap:8px;padding-top:8px;">
+        <div style="display:flex;align-items:flex-end;gap:6px;height:90px;">
           ${renderMonthlyChart(month,year)}
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:16px;padding-top:16px;border-top:1px solid rgba(0,0,0,0.06);">
-          <div>
-            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Entrate</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--green);">${fmt(inc)}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin-top:20px;padding-top:16px;border-top:1px solid rgba(0,0,0,0.05);">
+          <div style="padding-right:16px;border-right:1px solid rgba(0,0,0,0.05);">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:4px;">Entrate</div>
+            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:#059669;">${fmt(inc)}</div>
           </div>
-          <div>
-            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Uscite</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">−${fmt(exp)}</div>
+          <div style="padding:0 16px;border-right:1px solid rgba(0,0,0,0.05);">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:4px;">Uscite</div>
+            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:#dc2626;">−${fmt(exp)}</div>
           </div>
-          <div>
-            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Saldo</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
+          <div style="padding-left:16px;">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:4px;">Saldo</div>
+            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:${net>=0?'#059669':'#dc2626'};">${fmt(net)}</div>
           </div>
         </div>
       </div>
 
-      <!-- Colonna destra: ultimi movimenti + insoluti -->
-      <div style="display:flex;flex-direction:column;gap:16px;">
+      <!-- Colonna destra -->
+      <div style="display:flex;flex-direction:column;gap:14px;">
 
         <!-- Ultimi movimenti -->
-        <div class="card" style="padding:20px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-            <div class="card-title" style="margin-bottom:0;">Ultimi movimenti</div>
-            <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('movements')">Vedi tutti</button>
+        <div style="background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;flex:1;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <div style="font-size:13px;font-weight:800;color:#111;">Ultimi movimenti</div>
+            <button onclick="window.render('movements')" style="font-size:11px;font-weight:700;color:#6b7280;background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:6px;transition:background .1s;" onmouseenter="this.style.background='#f3f4f6'" onmouseleave="this.style.background='none'">Vedi tutti →</button>
           </div>
-          <div class="tx-list">${recentHtml}</div>
+          ${recentHtml}
         </div>
 
         <!-- Insoluti clienti -->
-        <div class="card" style="padding:20px;display:flex;flex-direction:column;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-            <div class="card-title" style="margin-bottom:0;">Clienti che devono pagare</div>
-            <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('clients')">Vedi tutti</button>
+        <div style="background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
+            <div style="font-size:13px;font-weight:800;color:#111;">Da incassare</div>
+            <button onclick="window.render('clients')" style="font-size:11px;font-weight:700;color:#6b7280;background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:6px;transition:background .1s;" onmouseenter="this.style.background='#f3f4f6'" onmouseleave="this.style.background='none'">Vedi tutti →</button>
           </div>
-          <div class="tx-list">${renderOutstandingPayments()}</div>
+          ${renderOutstandingPayments()}
         </div>
 
       </div>

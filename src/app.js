@@ -329,7 +329,7 @@ const ensureShell = () => {
       <aside class="sidebar" id="sidebar"></aside>
       <div class="main-content" id="main-content">
         <div id="period-bar-slot"></div>
-        <div id="page-slot"></div>
+        <div id="page-slot" style="flex:1;min-height:0;overflow-y:auto;"></div>
       </div>
     </div>
     <!-- mobile bottom nav injected separately -->`;
@@ -441,87 +441,142 @@ const renderOutstandingPayments = () => {
     </div>`).join('');
 };
 
+const renderOutstandingPayments = () => {
+  const allMissing=state.clients.filter(c=>c.active&&calcClientStatus(c.id).missing>0.01);
+  if(!allMissing.length) return '<div style="text-align:center;padding:24px 0;font-size:13px;font-weight:700;color:var(--muted);">✨ Nessun insoluto</div>';
+  return allMissing.map(c=>{
+    const {missing}=calcClientStatus(c.id);
+    const lordo=c.monthlyAmount||c.expectedAmount||0;
+    return `<div class="tx-item" onclick="window.openClientDetail('${c.id}')" style="cursor:pointer;">
+      <div style="width:8px;height:8px;border-radius:50%;background:var(--amber);flex-shrink:0;"></div>
+      <div class="tx-info">
+        <div class="tx-label">${esc(c.name)}</div>
+        <div class="tx-meta">${c.area.toUpperCase()} · ${c.payMode==='fatt'?'Fattura':'Contanti'}</div>
+      </div>
+      <div style="text-align:right;flex-shrink:0;">
+        <div style="font-family:'Sora';font-size:14px;font-weight:800;color:var(--red);">-${fmt(missing)}</div>
+        <div style="font-size:10px;color:var(--muted);font-weight:700;">atteso ${fmt(lordo)}/m</div>
+      </div>
+    </div>`;
+  }).join('');
+};
+
+const renderMonthlyChart = (month, year) => {
+  // Ultimi 6 mesi di entrate nette Nico
+  const now = new Date(year, month-1, 1);
+  const bars = [];
+  for(let i=5; i>=0; i--){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    const m = d.getMonth()+1, y = d.getFullYear();
+    const inc = calcNicoIncome(m,y);
+    const exp = calcNicoExpenses(m,y);
+    bars.push({label: MS_ABBR[d.getMonth()], inc, exp});
+  }
+  const maxVal = Math.max(...bars.map(b=>b.inc), ...bars.map(b=>b.exp), 1);
+  return bars.map(b=>`
+    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;">
+      <div style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1px;height:80px;justify-content:flex-end;">
+        <div style="width:70%;background:var(--green);border-radius:3px 3px 0 0;height:${Math.round((b.inc/maxVal)*72)}px;min-height:${b.inc>0?2:0}px;"></div>
+        <div style="width:70%;background:var(--red);border-radius:0 0 3px 3px;height:${Math.round((b.exp/maxVal)*72)}px;min-height:${b.exp>0?2:0}px;"></div>
+      </div>
+      <div style="font-size:9px;color:var(--muted);font-weight:800;">${b.label}</div>
+    </div>`).join('');
+};
+
 const renderHomeView = (slot) => {
   const {month,year}=state.filters;
-  const net=calcNicoNet(month,year), inlab=calcInlabTotal(month,year);
+  const net=calcNicoNet(month,year);
+  const inlab=calcInlabTotal(month,year);
   const inc=calcNicoIncome(month,year), exp=calcNicoExpenses(month,year);
   const tot=getWealthTotal();
   const stipendio=calcStipendioStimato();
+  const inlabExp=calcInlabExpenses(month,year);
+  const bal=calcInlabBalance(month,year);
   renderPeriodSelectors('Dashboard');
   slot.innerHTML=`<div class="page fade-up">
-    <div class="page-header">
-      <div class="page-title">Panoramica</div>
-      <div class="page-sub">${getPeriodLabel()}</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+      <div>
+        <div style="font-family:'Sora';font-size:20px;font-weight:800;letter-spacing:-0.02em;color:#000;">Panoramica</div>
+        <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;">${getPeriodLabel()}</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-primary" onclick="window.openIncomeModal()">＋ Entrata</button>
+        <button class="btn-ghost" onclick="window.openExpenseModal()">－ Uscita</button>
+      </div>
     </div>
 
+    <!-- 4 KPI cards -->
     <div class="grid-4" style="margin-bottom:20px;">
-      <div class="kpi-card" style="border-left:3px solid #000;">
+      <div class="kpi-card" style="border-left:3px solid #000;cursor:pointer;" onclick="window.render('nico')">
         <div class="kpi-label">Netto Nico</div>
-        <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
-        <div class="kpi-delta">Entrate - Uscite</div>
+        <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'}">${fmt(net)}</div>
+        <div class="kpi-delta" style="color:${net>=0?'var(--green)':'var(--red)'}">${net>=0?'↑':'↓'} ${fmt(inc)} entrate</div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--muted);">
+      <div class="kpi-card" style="border-left:3px solid var(--muted);cursor:pointer;" onclick="window.render('inlab')">
         <div class="kpi-label">Giro Inlab</div>
         <div class="kpi-val">${fmt(inlab)}</div>
-        <div class="kpi-delta">Fatturato agenzia</div>
+        <div class="kpi-delta">Quota Nico: ${fmt(bal.nicoShare)}</div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--green);">
-        <div class="kpi-label">Patrimonio Totale</div>
+      <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;" onclick="window.render('assets')">
+        <div class="kpi-label">Patrimonio</div>
         <div class="kpi-val">${fmt(tot)}</div>
         <div class="kpi-delta">Liquidità + Investimenti</div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--amber);">
-        <div class="kpi-label">Stipendio Stimato</div>
+      <div class="kpi-card" style="border-left:3px solid var(--amber);cursor:pointer;" onclick="window.render('taxes')">
+        <div class="kpi-label">Stipendio stimato</div>
         <div class="kpi-val">${fmt(stipendio)}</div>
         <div class="kpi-delta">Clienti attivi × quota</div>
       </div>
     </div>
 
-    <div class="two-panel">
-      <div>
-        <div class="analysis-row">
-          <button class="btn-analysis nico" onclick="window.render('nico')">
-            <div class="a-sub">Il mio Netto</div>
-            <div class="a-label">Nico</div>
-            <div class="a-amount">${fmt(net)}</div>
-          </button>
-          <button class="btn-analysis inlab" onclick="window.render('inlab')">
-            <div class="a-sub">Giro Agenzia</div>
-            <div class="a-label">Inlab</div>
-            <div class="a-amount">${fmt(inlab)}</div>
-          </button>
-        </div>
-
-        <div class="card" style="margin-bottom:16px;">
-          <div class="card-title">Dettaglio ${getPeriodLabel()}</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;margin-top:10px;">
-            <div>
-              <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">Entrate</div>
-              <div style="font-family:'Sora';font-size:20px;font-weight:800;color:var(--green);">${fmt(inc)}</div>
-            </div>
-            <div>
-              <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">Uscite</div>
-              <div style="font-family:'Sora';font-size:20px;font-weight:800;color:var(--red);">-${fmt(exp)}</div>
-            </div>
-            <div>
-              <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">Saldo</div>
-              <div style="font-family:'Sora';font-size:20px;font-weight:800;color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
+    <!-- Two columns: grafico + insoluti -->
+    <div style="display:grid;grid-template-columns:1fr 340px;gap:16px;">
+      <!-- Grafico entrate/uscite -->
+      <div class="card" style="padding:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+          <div>
+            <div class="card-title">Entrate vs uscite — ultimi 6 mesi</div>
+            <div style="display:flex;gap:14px;margin-top:6px;">
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
+                <span style="width:8px;height:8px;border-radius:2px;background:var(--green);display:inline-block;"></span>Entrate
+              </div>
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
+                <span style="width:8px;height:8px;border-radius:2px;background:var(--red);display:inline-block;"></span>Uscite
+              </div>
             </div>
           </div>
+          <div style="text-align:right;">
+            <div style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;">Questo mese</div>
+            <div style="font-family:'Sora';font-size:22px;font-weight:800;color:${net>=0?'var(--green)':'var(--red)'};">${fmt(net)}</div>
+          </div>
         </div>
-
-        <div style="display:flex;gap:10px;">
-          <button class="btn-primary" style="flex:1;" onclick="window.openIncomeModal()">＋ Nuova Entrata</button>
-          <button class="btn-ghost" style="flex:1;" onclick="window.openExpenseModal()">－ Nuova Uscita</button>
+        <div style="display:flex;align-items:flex-end;gap:8px;padding-top:8px;">
+          ${renderMonthlyChart(month,year)}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:16px;padding-top:16px;border-top:1px solid rgba(0,0,0,0.06);">
+          <div>
+            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Entrate</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--green);">${fmt(inc)}</div>
+          </div>
+          <div>
+            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Uscite</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">-${fmt(exp)}</div>
+          </div>
+          <div>
+            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Saldo</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
+          </div>
         </div>
       </div>
 
-      <div>
-        <div class="card">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
-            <div class="card-title" style="margin-bottom:0;">Insoluti</div>
-          </div>
-          <div class="tx-list">${renderOutstandingPayments()}</div>
+      <!-- Insoluti clienti -->
+      <div class="card" style="padding:20px;display:flex;flex-direction:column;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <div class="card-title" style="margin-bottom:0;">Clienti che devono pagare</div>
+          <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('clients')">Vedi tutti</button>
+        </div>
+        <div class="tx-list" style="flex:1;">
+          ${renderOutstandingPayments()}
         </div>
       </div>
     </div>

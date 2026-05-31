@@ -479,14 +479,36 @@ const renderHomeView = (slot) => {
   const inc=calcNicoIncome(month,year), exp=calcNicoExpenses(month,year);
   const tot=getWealthTotal();
   const stipendio=calcStipendioStimato();
-  const inlabExp=calcInlabExpenses(month,year);
   const bal=calcInlabBalance(month,year);
+  const liq=getLiquidTotal();
+  const inv=getInvestTotal();
+
+  // Ultimi 5 movimenti ordinati per data desc
+  const recentTx = [...state.transactions]
+    .sort((a,b)=>(b.date||'').localeCompare(a.date||''))
+    .slice(0,5);
+
+  const recentHtml = recentTx.length ? recentTx.map(tx=>{
+    const isInc = tx.kind==='income';
+    const area = tx.area==='inlab' ? '<span style="font-size:9px;font-weight:800;background:#f3f4f6;color:#6b7280;border-radius:4px;padding:1px 5px;margin-left:4px;">INLAB</span>' : '';
+    return `<div class="tx-item">
+      <div class="tx-dot" style="background:${isInc?'var(--green)':'var(--red)'}"></div>
+      <div class="tx-info">
+        <div class="tx-label">${esc(tx.label||tx.category||'—')}${area}</div>
+        <div class="tx-meta">${tx.date ? new Date(tx.date).toLocaleDateString('it-IT',{day:'2-digit',month:'short'}) : '—'}${tx.category?' · '+esc(tx.category):''}</div>
+      </div>
+      <div class="tx-amount ${isInc?'pos':'neg'}">${isInc?'+':'−'}${fmt(Math.abs(tx.amount||0))}</div>
+    </div>`;
+  }).join('') : `<div style="text-align:center;padding:24px 0;font-size:12px;font-weight:700;color:var(--muted);">Nessun movimento</div>`;
+
   renderPeriodSelectors('Dashboard');
   slot.innerHTML=`<div class="page fade-up">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
+
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:24px;">
       <div>
-        <div style="font-family:'Sora';font-size:20px;font-weight:800;letter-spacing:-0.02em;color:#000;">Panoramica</div>
-        <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;">${getPeriodLabel()}</div>
+        <div style="font-family:'Sora';font-size:22px;font-weight:800;letter-spacing:-0.03em;color:#000;">Panoramica</div>
+        <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;margin-top:2px;">${getPeriodLabel()}</div>
       </div>
       <div style="display:flex;gap:8px;">
         <button class="btn-primary" onclick="window.openIncomeModal()">＋ Entrata</button>
@@ -496,30 +518,43 @@ const renderHomeView = (slot) => {
 
     <!-- 4 KPI cards -->
     <div class="grid-4" style="margin-bottom:20px;">
-      <div class="kpi-card" style="border-left:3px solid #000;cursor:pointer;" onclick="window.render('nico')">
+      <div class="kpi-card" style="border-left:3px solid #000;cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('nico')">
         <div class="kpi-label">Netto Nico</div>
         <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'}">${fmt(net)}</div>
-        <div class="kpi-delta" style="color:${net>=0?'var(--green)':'var(--red)'}">${net>=0?'↑':'↓'} ${fmt(inc)} entrate</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+          <div class="kpi-delta" style="color:${net>=0?'var(--green)':'var(--red)'};">${net>=0?'↑':'↓'} ${fmt(inc)} entrate</div>
+          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+        </div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--muted);cursor:pointer;" onclick="window.render('inlab')">
+      <div class="kpi-card" style="border-left:3px solid #6b7280;cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('inlab')">
         <div class="kpi-label">Giro Inlab</div>
         <div class="kpi-val">${fmt(inlab)}</div>
-        <div class="kpi-delta">Quota Nico: ${fmt(bal.nicoShare)}</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+          <div class="kpi-delta">Quota Nico: ${fmt(bal.nicoShare)}</div>
+          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+        </div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;" onclick="window.render('assets')">
+      <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('assets')">
         <div class="kpi-label">Patrimonio</div>
         <div class="kpi-val">${fmt(tot)}</div>
-        <div class="kpi-delta">Liquidità + Investimenti</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+          <div class="kpi-delta"><span style="color:var(--green);">${fmt(liq)}</span> liq · <span style="color:#374151;">${fmt(inv)}</span> inv</div>
+          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+        </div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--amber);cursor:pointer;" onclick="window.render('taxes')">
+      <div class="kpi-card" style="border-left:3px solid var(--amber);cursor:pointer;transition:box-shadow .15s;" onmouseenter="this.style.boxShadow='0 4px 16px rgba(0,0,0,0.1)'" onmouseleave="this.style.boxShadow=''" onclick="window.render('taxes')">
         <div class="kpi-label">Stipendio stimato</div>
         <div class="kpi-val">${fmt(stipendio)}</div>
-        <div class="kpi-delta">Clienti attivi × quota</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;">
+          <div class="kpi-delta">Clienti attivi × quota</div>
+          <div style="font-size:10px;font-weight:700;color:var(--muted);">→</div>
+        </div>
       </div>
     </div>
 
-    <!-- Two columns: grafico + insoluti -->
+    <!-- Two columns: grafico + pannello destro -->
     <div style="display:grid;grid-template-columns:1fr 340px;gap:16px;">
+
       <!-- Grafico entrate/uscite -->
       <div class="card" style="padding:20px;">
         <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
@@ -549,7 +584,7 @@ const renderHomeView = (slot) => {
           </div>
           <div>
             <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Uscite</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">-${fmt(exp)}</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">−${fmt(exp)}</div>
           </div>
           <div>
             <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Saldo</div>
@@ -558,20 +593,31 @@ const renderHomeView = (slot) => {
         </div>
       </div>
 
-      <!-- Insoluti clienti -->
-      <div class="card" style="padding:20px;display:flex;flex-direction:column;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-          <div class="card-title" style="margin-bottom:0;">Clienti che devono pagare</div>
-          <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('clients')">Vedi tutti</button>
+      <!-- Colonna destra: ultimi movimenti + insoluti -->
+      <div style="display:flex;flex-direction:column;gap:16px;">
+
+        <!-- Ultimi movimenti -->
+        <div class="card" style="padding:20px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="card-title" style="margin-bottom:0;">Ultimi movimenti</div>
+            <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('movements')">Vedi tutti</button>
+          </div>
+          <div class="tx-list">${recentHtml}</div>
         </div>
-        <div class="tx-list" style="flex:1;">
-          ${renderOutstandingPayments()}
+
+        <!-- Insoluti clienti -->
+        <div class="card" style="padding:20px;display:flex;flex-direction:column;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="card-title" style="margin-bottom:0;">Clienti che devono pagare</div>
+            <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('clients')">Vedi tutti</button>
+          </div>
+          <div class="tx-list">${renderOutstandingPayments()}</div>
         </div>
+
       </div>
     </div>
   </div>`;
 };
-
 // ═══════════════════════════════════════════════════
 // NICO VIEW
 // ═══════════════════════════════════════════════════

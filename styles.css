@@ -127,8 +127,6 @@ h1, h2, h3, .sora { font-family: 'Sora', sans-serif; }
 /* MAIN CONTENT */
 .main-content {
   margin-left: var(--sidebar-w);
-  width: calc(100vw - var(--sidebar-w));
-  min-width: 0;
   height: 100vh;
   display: flex;
   flex-direction: column;

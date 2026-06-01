@@ -481,72 +481,187 @@ const initEvolutionChart = () => {
 // ═══════════════════════════════════════════════════
 // UI — APP + NAV (Desktop Layout)
 // ═══════════════════════════════════════════════════
-const app           = document.getElementById('app');
-const modalContainer= document.getElementById('modal-container');
-let lastViewId      = 'home';
-window._assetConfirmId = null;
+// ═══════════════════════════════════════════════════
+// STATE — add debts array
+// ═══════════════════════════════════════════════════
+// Debts are stored in state.debts: [{id, name, amount, date, note, settled}]
 
-// Build the persistent app shell on first render
+// ═══════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════
+
+// Insoluti per mese: ogni cliente attivo × ogni mese passato dove non ha pagato
+const getMonthlyOutstanding = () => {
+  const now = new Date();
+  const curY = now.getFullYear();
+  const curM = now.getMonth() + 1;
+  const items = [];
+
+  state.clients.filter(c => c.active && c.recurring).forEach(c => {
+    // Check every month from jan of first transaction year to current month
+    const startYear = 2024;
+    for (let y = startYear; y <= curY; y++) {
+      const maxM = y === curY ? curM : 12;
+      for (let m = 1; m <= maxM; m++) {
+        // How much paid for this client in this month?
+        const paid = state.transactions
+          .filter(t => t.clientId === c.id && t.kind === 'income')
+          .filter(t => { const d = new Date(t.date); return d.getFullYear() === y && d.getMonth()+1 === m; })
+          .reduce((s, t) => s + (parseFloat(t.gross)||0), 0);
+        const expected = parseFloat(c.monthlyAmount || c.expectedAmount) || 0;
+        if (paid < expected - 0.01) {
+          items.push({ client: c, month: m, year: y, paid, missing: round(expected - paid) });
+        }
+      }
+    }
+  });
+
+  // Sort: most recent first
+  items.sort((a, b) => (b.year*12+b.month) - (a.year*12+a.month));
+  return items;
+};
+
+const getDebts = () => (state.debts || []).filter(d => !d.settled);
+
+const calcNicoAnnual = (year) => {
+  const inc = calcNicoIncome(13, year);
+  const exp = calcNicoExpenses(13, year);
+  return { inc, exp, net: round(inc - exp) };
+};
+
+// Bar chart HTML (no numbers, visual only)
+const renderBarChart = (data, height=80) => {
+  const maxVal = Math.max(...data.map(d => Math.max(d.inc||0, d.exp||0)), 1);
+  return data.map(d => {
+    const incH = Math.round(((d.inc||0)/maxVal)*(height-4));
+    const expH = Math.round(((d.exp||0)/maxVal)*(height-4));
+    return '<div class="bar-col">'+
+      '<div style="display:flex;flex-direction:column;justify-content:flex-end;height:'+height+'px;gap:1px;">'+
+        '<div class="bar-inc" style="height:'+incH+'px;"></div>'+
+        '<div class="bar-exp" style="height:'+expH+'px;"></div>'+
+      '</div>'+
+      '<div class="bar-label">'+d.label+'</div>'+
+    '</div>';
+  }).join('');
+};
+
+// Category chart for expenses
+const renderCategoryBars = (month, year) => {
+  const txs = state.transactions.filter(t => {
+    if (t.kind !== 'expense') return false;
+    const d = new Date(t.date);
+    if (year && d.getFullYear() !== year) return false;
+    if (month && month !== 13 && d.getMonth()+1 !== month) return false;
+    return true;
+  });
+  const cats = {};
+  txs.forEach(t => {
+    const cat = t.category || 'Altro';
+    cats[cat] = (cats[cat]||0) + (parseFloat(t.gross)||0);
+  });
+  const sorted = Object.entries(cats).sort((a,b)=>b[1]-a[1]).slice(0,6);
+  if (!sorted.length) return '<div class="empty">Nessuna spesa</div>';
+  const max = sorted[0][1];
+  return sorted.map(([cat, amt]) => {
+    const pctW = Math.round((amt/max)*100);
+    return '<div style="margin-bottom:8px;">'+
+      '<div style="display:flex;justify-content:space-between;font-size:11px;font-weight:700;margin-bottom:3px;">'+
+        '<span>'+esc(cat)+'</span>'+
+        '<span style="color:var(--red);font-weight:800;">'+fmt(amt)+'</span>'+
+      '</div>'+
+      '<div style="background:#f3f4f6;border-radius:999px;height:5px;overflow:hidden;">'+
+        '<div style="width:'+pctW+'%;height:100%;background:var(--red);border-radius:999px;"></div>'+
+      '</div>'+
+    '</div>';
+  }).join('');
+};
+
+// ═══════════════════════════════════════════════════
+// SHELL + NAV
+// ═══════════════════════════════════════════════════
+
 const ensureShell = () => {
-  if(document.getElementById('app-shell')) return;
+  if (document.getElementById('app-shell')) return;
   app.innerHTML = `
     <div class="app-shell" id="app-shell">
       <aside class="sidebar" id="sidebar"></aside>
       <div class="main-content" id="main-content">
-        <div id="period-bar-slot"></div>
+        <div id="top-bar-slot"></div>
         <div id="page-slot" style="flex:1;min-height:0;overflow-y:auto;"></div>
       </div>
-    </div>
-    <!-- mobile bottom nav injected separately -->`;
+    </div>`;
 };
 
 const NAV_ITEMS = [
-  { section: null,       id:'home',      label:'Home',        icon:'⌂' },
-  { section: 'Analisi',  id:'nico',      label:'Nico',        icon:'◉' },
-  { section: null,       id:'inlab',     label:'Inlab',       icon:'◎' },
-  { section: 'Gestione', id:'movements', label:'Movimenti',   icon:'☰' },
-  { section: null,       id:'clients',   label:'CRM Clienti', icon:'👥' },
-  { section: null,       id:'assets',    label:'Patrimonio',  icon:'◈' },
-  { section: null,       id:'taxes',     label:'Tasse',       icon:'%' },
+  { id:'home',      label:'Home',        icon:'⌂', section: null },
+  { id:'nico',      label:'Nico',        icon:'◉', section: 'Analisi' },
+  { id:'inlab',     label:'Inlab',       icon:'◎', section: null },
+  { id:'assets',    label:'Patrimonio',  icon:'◈', section: null },
+  { id:'movements', label:'Movimenti',   icon:'☰', section: 'Gestione' },
+  { id:'clients',   label:'Clienti',     icon:'👥', section: null },
+  { id:'taxes',     label:'Tasse',       icon:'%', section: null },
 ];
 
 const renderSidebar = activeId => {
   const sb = document.getElementById('sidebar');
-  if(!sb) return;
-  let html = `<div class="sidebar-logo">Bilancio <span>Nico</span></div>`;
-  let lastSection = null;
+  if (!sb) return;
+  let html = '<div class="sidebar-logo">Bilancio <span>Nico</span></div>';
+  let lastSec = null;
   NAV_ITEMS.forEach(it => {
-    if(it.section && it.section !== lastSection){
-      html += `<div class="sidebar-section-label">${it.section}</div>`;
-      lastSection = it.section;
+    if (it.section && it.section !== lastSec) {
+      html += '<div class="sidebar-section-label">'+it.section+'</div>';
+      lastSec = it.section;
     }
-    html += `<button class="nav-item ${activeId===it.id?'active':''}" onclick="window.render('${it.id}')">
-      <span class="nav-icon">${it.icon}</span> ${it.label}
-    </button>`;
+    html += '<button class="nav-item '+(activeId===it.id?'active':'')+'" onclick="window.render(\''+it.id+'\')">'+
+      '<span class="nav-icon">'+it.icon+'</span> '+it.label+'</button>';
   });
-  html += `<div class="sidebar-actions">
-    <button class="btn-sidebar-action income" onclick="window.openIncomeModal()">＋ Entrata</button>
-    <button class="btn-sidebar-action expense" onclick="window.openExpenseModal()">－ Uscita</button>
-  </div>`;
+  html += '<div class="sidebar-actions">'+
+    '<button class="btn-sidebar-action income" onclick="window.openIncomeModal()">＋ Entrata</button>'+
+    '<button class="btn-sidebar-action expense" onclick="window.openExpenseModal()">－ Uscita</button>'+
+  '</div>';
   sb.innerHTML = html;
 };
 
 const renderMobileNav = activeId => {
   document.querySelector('.bottom-nav-mobile')?.remove();
-  const items = [
-    {id:'home',label:'Home',icon:'⌂'},
-    {id:'movements',label:'Lista',icon:'☰'},
-    {id:'clients',label:'CRM',icon:'👥'},
-    {id:'taxes',label:'Tasse',icon:'%'}
-  ];
+  const items = [{id:'home',label:'Home',icon:'⌂'},{id:'nico',label:'Nico',icon:'◉'},{id:'clients',label:'Clienti',icon:'👥'},{id:'assets',label:'Patrimonio',icon:'◈'}];
   const nav = document.createElement('nav');
   nav.className = 'bottom-nav-mobile';
-  nav.innerHTML = items.map(it=>`
-    <button class="nav-btn-mobile ${activeId===it.id?'active':''}" onclick="window.render('${it.id}')">
-      <span style="font-size:18px;">${it.icon}</span>
-      <span>${it.label}</span>
-    </button>`).join('');
+  nav.innerHTML = items.map(it=>'<button class="nav-btn-mobile '+(activeId===it.id?'active':'')+'" onclick="window.render(\''+it.id+'\')"><span style="font-size:18px;">'+it.icon+'</span><span>'+it.label+'</span></button>').join('');
   document.body.appendChild(nav);
+};
+
+// Top bar: only shows for non-home views
+const renderTopBar = (viewId, pageLabel) => {
+  const slot = document.getElementById('top-bar-slot');
+  if (!slot) return;
+  if (viewId === 'home') { slot.innerHTML = ''; return; }
+  const {month,year,period,rangeFrom,rangeTo} = state.filters;
+  const availYears = getAvailableYears();
+  const yearOpts = availYears.map(y=>'<option value="'+y+'" '+(year===y?'selected':'')+'>'+y+'</option>').join('');
+  const monthOpts = MONTHS.slice(0,12).map((n,i)=>'<option value="'+(i+1)+'" '+(month===i+1?'selected':'')+'>'+n+'</option>').join('');
+  const cmpOpts = availYears.filter(y=>y!==year).map(y=>'<option value="'+y+'" '+(state.filters.compareYear===y?'selected':'')+'>'+y+'</option>').join('');
+
+  slot.innerHTML = '<div class="top-bar">'+
+    (pageLabel?'<span class="top-bar-label">'+pageLabel+'</span><div style="width:1px;height:18px;background:var(--border);"></div>':'')+
+    '<div class="period-chips">'+
+      '<button class="chip '+(period==='monthly'?'active':'')+'" onclick="window.updatePeriodType(\'monthly\')">Mese</button>'+
+      '<button class="chip '+(period==='annual'?'active':'')+'" onclick="window.updatePeriodType(\'annual\')">Anno</button>'+
+      '<button class="chip '+(period==='range'?'active':'')+'" onclick="window.updatePeriodType(\'range\')">Range</button>'+
+    '</div>'+
+    (period==='monthly'?'<select class="filter-select" onchange="window.updateFilter(\'month\',this.value)">'+monthOpts+'</select>':'')+
+    (period==='range'?
+      '<select class="filter-select" onchange="window.updateFilter(\'rangeFrom\',this.value)">'+MS_ABBR.map((n,i)=>'<option value="'+(i+1)+'" '+(rangeFrom===i+1?'selected':'')+'>'+n+'</option>').join('')+'</select>'+
+      '<span style="font-size:10px;color:var(--muted);font-weight:800;">→</span>'+
+      '<select class="filter-select" onchange="window.updateFilter(\'rangeTo\',this.value)">'+MS_ABBR.map((n,i)=>'<option value="'+(i+1)+'" '+(rangeTo===i+1?'selected':'')+'>'+n+'</option>').join('')+'</select>':'')+
+    '<select class="filter-select" onchange="window.updateFilter(\'year\',this.value)">'+yearOpts+'</select>'+
+    '<div style="margin-left:auto;display:flex;align-items:center;gap:6px;">'+
+      '<span style="font-size:9px;font-weight:900;text-transform:uppercase;color:var(--muted);">vs</span>'+
+      '<select class="filter-select" onchange="window.updateFilter(\'compareYear\',parseInt(this.value)||null)">'+
+        '<option value="">—</option>'+cmpOpts+
+      '</select>'+
+    '</div>'+
+  '</div>';
 };
 
 const render = (viewId='home') => {
@@ -555,104 +670,51 @@ const render = (viewId='home') => {
   renderSidebar(viewId);
   renderMobileNav(viewId);
   const slot = document.getElementById('page-slot');
-  if(!slot) return;
-  if     (viewId==='home')          renderHomeView(slot);
-  else if(viewId==='nico')          renderNicoView(slot);
-  else if(viewId==='inlab')         renderInlabView(slot);
-  else if(viewId==='assets')        renderAssetsView(slot);
-  else if(viewId==='invest-detail') renderInvestDetail(slot);
-  else if(viewId==='movements')     renderMovementsView(slot);
-  else if(viewId==='clients')       renderClientsView(slot);
-  else if(viewId==='taxes')         renderTaxesView(slot);
-  else if(viewId==='nico-incomes')  renderNicoIncomesView(slot);
-  else if(viewId==='nico-expenses') renderNicoExpensesView(slot);
-};
-
-const renderPeriodSelectors = (pageLabel='') => {
-  const {month,year,period,rangeFrom,rangeTo}=state.filters;
-  const years=[new Date().getFullYear(),new Date().getFullYear()-1];
-  const monthSel=`<select class="filter-select" onchange="window.updateFilter('month',this.value)">${MONTHS.slice(0,12).map((n,i)=>`<option value="${i+1}" ${month===i+1?'selected':''}>${n}</option>`).join('')}</select>`;
-  const yearSel =`<select class="filter-select" onchange="window.updateFilter('year',this.value)">${years.map(y=>`<option value="${y}" ${year===y?'selected':''}>${y}</option>`).join('')}</select>`;
-  const rangeSel=`<div style="display:flex;align-items:center;gap:6px;"><select class="filter-select" onchange="window.updateFilter('rangeFrom',this.value)">${MS_ABBR.map((n,i)=>`<option value="${i+1}" ${rangeFrom===i+1?'selected':''}>${n}</option>`).join('')}</select><span style="font-size:10px;color:var(--muted);font-weight:800;">→</span><select class="filter-select" onchange="window.updateFilter('rangeTo',this.value)">${MS_ABBR.map((n,i)=>`<option value="${i+1}" ${rangeTo===i+1?'selected':''}>${n}</option>`).join('')}</select></div>`;
-  const barSlot = document.getElementById('period-bar-slot');
-  if(barSlot){
-    barSlot.innerHTML=`<div class="period-bar">
-      ${pageLabel?'<span class="period-bar-label">'+pageLabel+'</span><div style="width:1px;height:20px;background:var(--border);"></div>':''}
-      <div class="period-chips">
-        <button class="chip ${period==='monthly'?'active':''}" onclick="window.updatePeriodType('monthly')">Mese</button>
-        <button class="chip ${period==='annual'?'active':''}" onclick="window.updatePeriodType('annual')">Annuale</button>
-        <button class="chip ${period==='range'?'active':''}" onclick="window.updatePeriodType('range')">Range</button>
-      </div>
-      ${period==='monthly'?monthSel:period==='range'?rangeSel:''}
-      ${yearSel}
-      ${renderCompareSelector()}
-    </div>`;
-  }
-  // Return empty string — no inline period block anymore
-  return '';
+  if (!slot) return;
+  const labels = {home:'',nico:'Nico',inlab:'Inlab',assets:'Patrimonio',movements:'Movimenti',clients:'Clienti',taxes:'Tasse','nico-incomes':'Entrate','nico-expenses':'Uscite','invest-detail':'Investimento'};
+  renderTopBar(viewId, labels[viewId]||'');
+  if      (viewId==='home')          renderHomeView(slot);
+  else if (viewId==='nico')          renderNicoView(slot);
+  else if (viewId==='inlab')         renderInlabView(slot);
+  else if (viewId==='assets')        renderAssetsView(slot);
+  else if (viewId==='invest-detail') renderInvestDetail(slot);
+  else if (viewId==='movements')     renderMovementsView(slot);
+  else if (viewId==='clients')       renderClientsView(slot);
+  else if (viewId==='taxes')         renderTaxesView(slot);
+  else if (viewId==='nico-incomes')  renderNicoIncomesView(slot);
+  else if (viewId==='nico-expenses') renderNicoExpensesView(slot);
 };
 
 // ═══════════════════════════════════════════════════
 // HOME VIEW
 // ═══════════════════════════════════════════════════
-
-const renderOutstandingPayments = () => {
-  const allMissing=state.clients.filter(c=>c.active&&calcClientStatus(c.id).missing>0.01);
-  if(!allMissing.length) return '<div style="text-align:center;padding:24px 0;font-size:13px;font-weight:700;color:var(--muted);">✨ Nessun insoluto</div>';
-  return allMissing.map(c=>{
-    const {missing}=calcClientStatus(c.id);
-    const lordo=c.monthlyAmount||c.expectedAmount||0;
-    return `<div class="tx-item" onclick="window.openClientDetail('${c.id}')" style="cursor:pointer;">
-      <div style="width:8px;height:8px;border-radius:50%;background:var(--amber);flex-shrink:0;"></div>
-      <div class="tx-info">
-        <div class="tx-label">${esc(c.name)}</div>
-        <div class="tx-meta">${c.area.toUpperCase()} · ${c.payMode==='fatt'?'Fattura':'Contanti'}</div>
-      </div>
-      <div style="text-align:right;flex-shrink:0;">
-        <div style="font-family:'Sora';font-size:14px;font-weight:800;color:var(--red);">-${fmt(missing)}</div>
-        <div style="font-size:10px;color:var(--muted);font-weight:700;">atteso ${fmt(lordo)}/m</div>
-      </div>
-    </div>`;
-  }).join('');
-};
-
-const renderMonthlyChart = (month, year) => {
-  // Ultimi 6 mesi di entrate nette Nico
-  const now = new Date(year, month-1, 1);
-  const bars = [];
-  for(let i=5; i>=0; i--){
-    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-    const m = d.getMonth()+1, y = d.getFullYear();
-    const inc = calcNicoIncome(m,y);
-    const exp = calcNicoExpenses(m,y);
-    bars.push({label: MS_ABBR[d.getMonth()], inc, exp});
-  }
-  const maxVal = Math.max(...bars.map(b=>b.inc), ...bars.map(b=>b.exp), 1);
-  return bars.map(b=>`
-    <div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;">
-      <div style="width:100%;display:flex;flex-direction:column;align-items:center;gap:1px;height:80px;justify-content:flex-end;">
-        <div style="width:70%;background:var(--green);border-radius:3px 3px 0 0;height:${Math.round((b.inc/maxVal)*72)}px;min-height:${b.inc>0?2:0}px;"></div>
-        <div style="width:70%;background:var(--red);border-radius:0 0 3px 3px;height:${Math.round((b.exp/maxVal)*72)}px;min-height:${b.exp>0?2:0}px;"></div>
-      </div>
-      <div style="font-size:9px;color:var(--muted);font-weight:800;">${b.label}</div>
-    </div>`).join('');
-};
-
 const renderHomeView = (slot) => {
-  const {month,year}=state.filters;
-  const net=calcNicoNet(month,year);
-  const inlab=calcInlabTotal(month,year);
-  const inc=calcNicoIncome(month,year), exp=calcNicoExpenses(month,year);
-  const tot=getWealthTotal();
-  const stipendio=calcStipendioStimato();
-  const inlabExp=calcInlabExpenses(month,year);
-  const bal=calcInlabBalance(month,year);
-  renderPeriodSelectors('Dashboard');
-  slot.innerHTML=`<div class="page fade-up">
+  const now = new Date();
+  const curM = now.getMonth()+1, curY = now.getFullYear();
+  const annual = calcNicoAnnual(curY);
+  const tot = getWealthTotal();
+  const stipendio = calcStipendioStimato();
+  const resparmioAnnuo = annual.net;
+
+  // Bar chart: last 12 months
+  const barData = [];
+  for (let i=11; i>=0; i--) {
+    const d = new Date(curY, curM-1-i, 1);
+    const m = d.getMonth()+1, y = d.getFullYear();
+    barData.push({ label: MS_ABBR[d.getMonth()], inc: calcNicoIncome(m,y), exp: calcNicoExpenses(m,y) });
+  }
+
+  // Outstanding: monthly list
+  const outstanding = getMonthlyOutstanding().slice(0,6);
+  const debts = getDebts().slice(0,3);
+  const totalOutstanding = getMonthlyOutstanding().reduce((s,i)=>s+i.missing,0);
+  const totalDebts = getDebts().reduce((s,d)=>s+(parseFloat(d.amount)||0),0);
+
+  slot.innerHTML = `<div class="page fade-up">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
       <div>
-        <div style="font-family:'Sora';font-size:20px;font-weight:800;letter-spacing:-0.02em;color:#000;">Panoramica</div>
-        <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;">${getPeriodLabel()}</div>
+        <div style="font-family:'Sora';font-size:18px;font-weight:800;letter-spacing:-.03em;color:#000;">Panoramica ${curY}</div>
+        <div style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;">${MONTHS[curM-1]} ${curY} in corso</div>
       </div>
       <div style="display:flex;gap:8px;">
         <button class="btn-primary" onclick="window.openIncomeModal()">＋ Entrata</button>
@@ -660,235 +722,235 @@ const renderHomeView = (slot) => {
       </div>
     </div>
 
-    <!-- 4 KPI cards -->
-    <div class="grid-4" style="margin-bottom:20px;">
-      <div class="kpi-card" style="border-left:3px solid #000;cursor:pointer;" onclick="window.render('nico')">
-        <div class="kpi-label">Netto Nico</div>
-        <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'}">${fmt(net)}</div>
-        <div class="kpi-delta" style="color:${net>=0?'var(--green)':'var(--red)'}">${net>=0?'↑':'↓'} ${fmt(inc)} entrate</div>
-      </div>
-      <div class="kpi-card" style="border-left:3px solid var(--muted);cursor:pointer;" onclick="window.render('inlab')">
-        <div class="kpi-label">Giro Inlab</div>
-        <div class="kpi-val">${fmt(inlab)}</div>
-        <div class="kpi-delta">Quota Nico: ${fmt(bal.nicoShare)}</div>
+    <!-- KPI row -->
+    <div class="grid-4" style="margin-bottom:16px;">
+      <div class="kpi-card" style="border-left:3px solid #000;">
+        <div class="kpi-label">Netto Annuale</div>
+        <div class="kpi-val" style="color:${annual.net>=0?'#000':'var(--red)'};">${fmt(annual.net)}</div>
+        <div class="kpi-delta">${fmt(annual.inc)} entrate · ${fmt(annual.exp)} uscite</div>
       </div>
       <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;" onclick="window.render('assets')">
         <div class="kpi-label">Patrimonio</div>
-        <div class="kpi-val">${fmt(tot)}</div>
+        <div class="kpi-val" style="color:var(--green);">${fmt(tot)}</div>
         <div class="kpi-delta">Liquidità + Investimenti</div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid var(--amber);cursor:pointer;" onclick="window.render('taxes')">
-        <div class="kpi-label">Stipendio stimato</div>
-        <div class="kpi-val">${fmt(stipendio)}</div>
+      <div class="kpi-card" style="border-left:3px solid var(--blue);cursor:pointer;" onclick="window.render('clients')">
+        <div class="kpi-label">Stipendio Stimato</div>
+        <div class="kpi-val" style="color:var(--blue);">${fmt(stipendio)}</div>
         <div class="kpi-delta">Clienti attivi × quota</div>
+      </div>
+      <div class="kpi-card" style="border-left:3px solid ${resparmioAnnuo>=0?'var(--green)':'var(--red)'};">
+        <div class="kpi-label">Risparmio Annuale</div>
+        <div class="kpi-val" style="color:${resparmioAnnuo>=0?'var(--green)':'var(--red)'};">${fmt(resparmioAnnuo)}</div>
+        <div class="kpi-delta">${resparmioAnnuo>=0?'In attivo':'In passivo'} quest\'anno</div>
       </div>
     </div>
 
-    <!-- Two columns: grafico + insoluti -->
-    <div style="display:grid;grid-template-columns:1fr 340px;gap:16px;">
-      <!-- Grafico entrate/uscite -->
-      <div class="card" style="padding:20px;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+    <!-- Two columns -->
+    <div class="two-panel">
+      <!-- LEFT: chart -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
           <div>
-            <div class="card-title">Entrate vs uscite — ultimi 6 mesi</div>
-            <div style="display:flex;gap:14px;margin-top:6px;">
-              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
+            <div class="card-title" style="margin-bottom:2px;">Andamento mensile</div>
+            <div style="display:flex;gap:10px;">
+              <div style="display:flex;align-items:center;gap:4px;font-size:10px;font-weight:700;color:var(--muted);">
                 <span style="width:8px;height:8px;border-radius:2px;background:var(--green);display:inline-block;"></span>Entrate
               </div>
-              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
+              <div style="display:flex;align-items:center;gap:4px;font-size:10px;font-weight:700;color:var(--muted);">
                 <span style="width:8px;height:8px;border-radius:2px;background:var(--red);display:inline-block;"></span>Uscite
               </div>
             </div>
           </div>
           <div style="text-align:right;">
-            <div style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;">Questo mese</div>
-            <div style="font-family:'Sora';font-size:22px;font-weight:800;color:${net>=0?'var(--green)':'var(--red)'};">${fmt(net)}</div>
+            <div style="font-size:9px;font-weight:800;color:var(--muted);text-transform:uppercase;">${MONTHS[curM-1]}</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${calcNicoNet(curM,curY)>=0?'var(--green)':'var(--red)'};">${fmt(calcNicoNet(curM,curY))}</div>
           </div>
         </div>
-        <div style="display:flex;align-items:flex-end;gap:8px;padding-top:8px;">
-          ${renderMonthlyChart(month,year)}
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:16px;padding-top:16px;border-top:1px solid rgba(0,0,0,0.06);">
-          <div>
-            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Entrate</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--green);">${fmt(inc)}</div>
-          </div>
-          <div>
-            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Uscite</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">-${fmt(exp)}</div>
-          </div>
-          <div>
-            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Saldo</div>
-            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
-          </div>
+        <div class="bar-chart">${renderBarChart(barData,80)}</div>
+
+        <!-- Month summary row -->
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid rgba(0,0,0,0.05);">
+          ${[{l:'Entrate',v:calcNicoIncome(curM,curY),c:'var(--green)'},{l:'Uscite',v:calcNicoExpenses(curM,curY),c:'var(--red)'},{l:'Netto mese',v:calcNicoNet(curM,curY),c:calcNicoNet(curM,curY)>=0?'var(--green)':'var(--red)'},{l:'Netto anno',v:annual.net,c:annual.net>=0?'#000':'var(--red)'}].map(x=>
+            '<div><div style="font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:2px;">'+x.l+'</div>'+
+            '<div style="font-family:\'Sora\';font-size:15px;font-weight:800;color:'+x.c+';">'+fmt(x.v)+'</div></div>'
+          ).join('')}
         </div>
       </div>
 
-      <!-- Insoluti clienti -->
-      <div class="card" style="padding:20px;display:flex;flex-direction:column;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-          <div class="card-title" style="margin-bottom:0;">Clienti che devono pagare</div>
-          <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('clients')">Vedi tutti</button>
-        </div>
-        <div class="tx-list" style="flex:1;">
-          ${renderOutstandingPayments()}
+      <!-- RIGHT: outstanding + debts -->
+      <div>
+        <div class="card" style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+            <div class="card-title" style="margin-bottom:0;">Da incassare</div>
+            <div style="display:flex;gap:6px;">
+              <button class="btn-ghost" style="font-size:10px;padding:4px 8px;" onclick="window.openAddDebtModal()">＋ Debito</button>
+              <button class="btn-ghost" style="font-size:10px;padding:4px 8px;" onclick="window.render('clients')">Vedi tutti</button>
+            </div>
+          </div>
+          <div style="font-family:'Sora';font-size:22px;font-weight:800;color:var(--red);margin-bottom:12px;">${fmt(totalOutstanding+totalDebts)}</div>
+          <div class="tx-list">
+            ${outstanding.length===0&&debts.length===0?'<div class="empty" style="padding:16px 0;">✨ Tutto in regola</div>':''}
+            ${outstanding.map(item=>{
+              const netto = item.client.payMode==='fatt' ? round(item.missing*0.75) : item.missing;
+              return '<div class="tx-item">'+
+                '<div class="tx-dot" style="background:var(--amber);"></div>'+
+                '<div class="tx-info">'+
+                  '<div class="tx-label">'+esc(item.client.name)+'</div>'+
+                  '<div class="tx-meta">'+MS_ABBR[item.month-1]+' '+item.year+' · '+(item.client.payMode==='fatt'?'Fattura':'Contanti')+'</div>'+
+                '</div>'+
+                '<div style="display:flex;align-items:center;gap:6px;">'+
+                  '<div style="text-align:right;">'+
+                    '<div style="font-size:12px;font-weight:800;color:var(--red);">-'+fmt(item.missing)+'</div>'+
+                  '</div>'+
+                  '<button onclick="window.markClientPaid(\''+item.client.id+'\','+item.month+','+item.year+','+item.missing+')" style="background:var(--green);border:none;color:#fff;border-radius:5px;font-size:9px;font-weight:800;padding:3px 6px;cursor:pointer;white-space:nowrap;">Pagato</button>'+
+                  '<button onclick="window.markClientSettled(\''+item.client.id+'\','+item.month+','+item.year+')" style="background:var(--muted);border:none;color:#fff;border-radius:5px;font-size:9px;font-weight:800;padding:3px 6px;cursor:pointer;">✓</button>'+
+                '</div>'+
+              '</div>';
+            }).join('')}
+            ${debts.map(d=>
+              '<div class="tx-item">'+
+                '<div class="tx-dot" style="background:var(--purple);"></div>'+
+                '<div class="tx-info">'+
+                  '<div class="tx-label">'+esc(d.name)+'</div>'+
+                  '<div class="tx-meta">Debito · '+fmtDate(d.date)+(d.note?' · '+esc(d.note):'')+'</div>'+
+                '</div>'+
+                '<div style="display:flex;align-items:center;gap:6px;">'+
+                  '<div style="font-size:12px;font-weight:800;color:var(--purple);">'+fmt(d.amount)+'</div>'+
+                  '<button onclick="window.settleDebt(\''+d.id+'\')" style="background:var(--purple);border:none;color:#fff;border-radius:5px;font-size:9px;font-weight:800;padding:3px 6px;cursor:pointer;">Saldato</button>'+
+                '</div>'+
+              '</div>'
+            ).join('')}
+          </div>
         </div>
       </div>
     </div>
-    ${state.filters.period==='annual'||state.filters.period==='range'?renderAnnualComparison(year):renderMonthComparison(month,year)}
   </div>`;
 };
 
 // ═══════════════════════════════════════════════════
-// NICO VIEW
+// NICO VIEW — solo flusso di cassa
 // ═══════════════════════════════════════════════════
 const renderNicoView = (slot) => {
-  const {month,year}=state.filters;
-  const inc=calcNicoIncome(month,year), exp=calcNicoExpenses(month,year), net=round(inc-exp);
-  const goal=state.settings.savingsGoal||10000, gp=Math.min(100,Math.max(0,(net/goal)*100));
-  const tot=getWealthTotal();
-  const totV1=round(state.assets.invest.reduce((s,i)=>s+(i.v1||0),0)+(state.assets.liquidInitial||0));
-  const diff=round(tot-totV1), diffPct=totV1>0?round((diff/totV1)*100):0;
-  renderPeriodSelectors('Analisi Nico');
-  slot.innerHTML=`<div class="page fade-up">
+  const {month,year,period} = state.filters;
+  const inc = calcNicoIncome(month,year);
+  const exp = calcNicoExpenses(month,year);
+  const net = round(inc-exp);
+  const goal = state.settings.savingsGoal||10000;
+  const gp = Math.min(100,Math.max(0,(net/goal)*100));
+  const label = getPeriodLabel();
+
+  // Monthly bar data for the year
+  const barData = MS_ABBR.map((l,i)=>({label:l,inc:calcNicoIncome(i+1,year),exp:calcNicoExpenses(i+1,year)}));
+
+  // Category breakdown
+  const catHtml = renderCategoryBars(month,year);
+
+  // Recent clients this period
+  const clientsTx = state.clients.filter(c=>c.active).map(c=>{
+    const paid = state.transactions.filter(t=>t.clientId===c.id&&inPeriod(t,month,year)).reduce((s,t)=>s+(parseFloat(t.gross)||0),0);
+    return {c,paid};
+  }).filter(x=>x.paid>0).sort((a,b)=>b.paid-a.paid);
+
+  slot.innerHTML = `<div class="page fade-up">
     <div class="page-header">
-      <div class="page-title">Analisi Nico</div>
-      <div class="page-sub">${getPeriodLabel()}</div>
+      <div class="page-title">Nico — Flusso di cassa</div>
+      <div class="page-sub">${label}</div>
     </div>
 
-    <div class="grid-3" style="margin-bottom:20px;">
-      <div class="kpi-card" style="cursor:pointer;border-left:3px solid var(--green);" onclick="window.render('nico-incomes')">
-        <div class="kpi-label">Entrate ↗</div>
+    <!-- KPI -->
+    <div class="grid-3" style="margin-bottom:16px;">
+      <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;" onclick="window.render('nico-incomes')">
+        <div class="kpi-label">Entrate</div>
         <div class="kpi-val" style="color:var(--green);">${fmt(inc)}</div>
-        <div class="kpi-delta">Tocca per dettaglio</div>
+        <div class="kpi-delta">Tocca per dettaglio ›</div>
       </div>
-      <div class="kpi-card" style="cursor:pointer;border-left:3px solid var(--red);" onclick="window.render('nico-expenses')">
-        <div class="kpi-label">Uscite ↗</div>
+      <div class="kpi-card" style="border-left:3px solid var(--red);cursor:pointer;" onclick="window.render('nico-expenses')">
+        <div class="kpi-label">Uscite</div>
         <div class="kpi-val" style="color:var(--red);">-${fmt(exp)}</div>
-        <div class="kpi-delta">Tocca per dettaglio</div>
+        <div class="kpi-delta">Tocca per dettaglio ›</div>
       </div>
-      <div class="kpi-card" style="border-left:3px solid #000;">
-        <div class="kpi-label">Risparmio Netto</div>
+      <div class="kpi-card" style="border-left:3px solid ${net>=0?'#000':'var(--red)'};">
+        <div class="kpi-label">Risparmio</div>
         <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
-        <div style="margin-top:8px;">
+        <div style="margin-top:6px;">
           <div class="progress-wrap"><div class="progress-bar" style="width:${gp}%;"></div></div>
-          <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:10px;font-weight:800;color:var(--muted);">
+          <div style="display:flex;justify-content:space-between;margin-top:3px;font-size:9px;font-weight:800;color:var(--muted);">
             <span>Target ${fmt(goal)}</span><span>${gp.toFixed(0)}%</span>
           </div>
         </div>
       </div>
     </div>
 
-    <div class="two-panel">
-      <div>
-        <div class="card" style="margin-bottom:16px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
-            <div class="card-title" style="margin-bottom:0;">Patrimonio Totale</div>
-            <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:${diff>=0?'var(--green)':'var(--red)'};">
-              ${diff>=0?'↑':'↓'} ${Math.abs(diffPct).toFixed(1)}% YTD
-            </div>
-          </div>
-          <div style="font-family:'Sora';font-size:36px;font-weight:800;letter-spacing:-0.04em;margin-bottom:20px;">${fmt(tot)}</div>
-          <div style="display:flex;align-items:center;gap:24px;">
-            <div style="position:relative;width:120px;height:120px;flex-shrink:0;">
-              <canvas id="pie-wealth" width="120" height="120"></canvas>
-              <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;">
-                <div style="font-size:9px;font-weight:800;color:#000;">TOTALE</div>
-              </div>
-            </div>
-            <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;">
-                  <span style="width:8px;height:8px;border-radius:50%;background:#000;flex-shrink:0;"></span> Liquidità
-                </div>
-                <div style="font-size:12px;font-weight:800;">${fmt(getLiquidTotal())}</div>
-              </div>
-              ${state.assets.invest.map(i=>`
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                  <div style="display:flex;align-items:center;gap:6px;font-size:12px;font-weight:700;">
-                    <span style="width:8px;height:8px;border-radius:50%;background:${i.color};flex-shrink:0;"></span> ${esc(i.name)}
-                  </div>
-                  <div style="font-size:12px;font-weight:800;">${fmt(i.balance)}</div>
-                </div>`).join('')}
-            </div>
-          </div>
-        </div>
-
-        <div class="card">
-          <div class="card-title" style="margin-bottom:12px;">Evoluzione Patrimonio</div>
-          <div style="height:140px;position:relative;"><canvas id="evolution-chart"></canvas></div>
-        </div>
+    <div class="three-panel">
+      <!-- Andamento mensile -->
+      <div class="card">
+        <div class="card-title">Andamento ${year}</div>
+        <div class="bar-chart" style="margin-top:8px;">${renderBarChart(barData,70)}</div>
+        ${renderAnnualComparison(year)?'<div style="margin-top:12px;">'+renderAnnualComparison(year)+'</div>':''}
       </div>
 
+      <!-- Spese per categoria -->
+      <div class="card">
+        <div class="card-title">Spese per categoria</div>
+        <div style="margin-top:8px;">${catHtml}</div>
+      </div>
+
+      <!-- Clienti del periodo -->
       <div>
-        <button class="btn-primary full" style="margin-bottom:16px;" onclick="window.render('assets')">
-          <span>Dashboard Patrimoniale</span><span>›</span>
-        </button>
         <div class="card">
-          <div class="card-title">Liquidità per conto</div>
-          ${state.assets.liquid.map(acc=>`
-            <div class="tx-item" style="cursor:default;">
-              <div class="tx-dot" style="background:${acc.color}"></div>
-              <div class="tx-info"><div class="tx-label">${esc(acc.name)}</div></div>
-              <div style="font-family:'Sora';font-size:13px;font-weight:800;">${fmt(acc.balance)}</div>
-            </div>`).join('')}
+          <div class="card-title">Clienti — ${label}</div>
+          <div class="tx-list">
+            ${clientsTx.length?clientsTx.map(({c,paid})=>{
+              const netto = c.payMode==='fatt'?round(paid*0.75):paid;
+              const nicoNet = c.area==='inlab'?round(netto*0.5):netto;
+              return '<div class="tx-item" onclick="window.openClientDetail(\''+c.id+'\')">'+
+                '<div class="tx-dot" style="background:var(--green);"></div>'+
+                '<div class="tx-info"><div class="tx-label">'+esc(c.name)+'</div><div class="tx-meta">'+c.area.toUpperCase()+'</div></div>'+
+                '<div style="font-size:12px;font-weight:800;color:var(--green);">'+fmt(nicoNet)+'</div>'+
+              '</div>';
+            }).join(''):'<div class="empty">Nessun incasso</div>'}
+          </div>
         </div>
       </div>
     </div>
-    <div id="nico-cmp" style="margin-top:16px;"></div>
   </div>`;
-  const cmpSlot = document.getElementById('nico-cmp');
-  if(cmpSlot){
-    if(state.filters.period==='annual'||state.filters.period==='range') cmpSlot.innerHTML=renderAnnualComparison(year);
-    else cmpSlot.innerHTML=renderMonthComparison(month,year);
-  }
-  setTimeout(()=>{ initWealthPie(); initEvolutionChart(); },100);
 };
 
 // ═══════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════
-// NICO — INCOMES DETAIL VIEW
+// NICO INCOMES + EXPENSES (sub-views)
 // ═══════════════════════════════════════════════════
 const renderNicoIncomesView = (slot) => {
   const {month,year}=state.filters;
   const txs=state.transactions.filter(t=>inPeriod(t,month,year)&&t.kind==='income').sort((a,b)=>new Date(b.date)-new Date(a.date));
   const totalFatt=txs.filter(t=>t.payMode==='fatt').reduce((s,t)=>s+(parseFloat(t.gross)||0),0);
   const totalCont=txs.filter(t=>t.payMode==='cont').reduce((s,t)=>s+(parseFloat(t.gross)||0),0);
-  renderPeriodSelectors('Entrate Nico');
   slot.innerHTML=`<div class="page fade-up">
     <button class="btn-back" onclick="window.render('nico')">← Nico</button>
     <div class="page-header"><div class="page-title">Entrate</div><div class="page-sub">${getPeriodLabel()}</div></div>
     <div class="two-panel">
       <div class="card">
         <div class="tx-list">
-          ${txs.length?txs.map(t=>`
-            <div class="tx-item" onclick="window.openDetail('${t.id}')">
-              <div class="tx-dot" style="background:var(--green)"></div>
-              <div class="tx-info">
-                <div class="tx-label">${esc(t.desc||t.area.toUpperCase())}</div>
-                <div class="tx-meta">${t.area.toUpperCase()} · ${t.payMode==='fatt'?'Fattura':'Contanti'} · ${fmtDate(t.date)}</div>
-              </div>
-              <div class="tx-amount pos">+${fmt(t.gross)}</div>
-            </div>`).join(''):'<div class="empty">Nessuna entrata</div>'}
+          ${txs.length?txs.map(t=>'<div class="tx-item" onclick="window.openDetail(\''+t.id+'\')">'+
+            '<div class="tx-dot" style="background:var(--green)"></div>'+
+            '<div class="tx-info"><div class="tx-label">'+esc(t.desc||t.area.toUpperCase())+'</div>'+
+            '<div class="tx-meta">'+t.area.toUpperCase()+' · '+(t.payMode==='fatt'?'Fattura':'Contanti')+' · '+fmtDate(t.date)+'</div></div>'+
+            '<div class="tx-amount pos">+'+fmt(t.gross)+'</div></div>').join(''):'<div class="empty">Nessuna entrata</div>'}
         </div>
       </div>
       <div>
         <div class="card">
           <div class="card-title">Riepilogo</div>
-          <div style="display:flex;flex-direction:column;gap:14px;margin-top:10px;">
-            <div><div style="font-size:10px;color:var(--muted);font-weight:800;margin-bottom:2px;">Fattura</div><div style="font-family:'Sora';font-size:22px;font-weight:800;color:var(--green);">${fmt(totalFatt)}</div></div>
-            <div><div style="font-size:10px;color:var(--muted);font-weight:800;margin-bottom:2px;">Contanti</div><div style="font-family:'Sora';font-size:22px;font-weight:800;color:var(--green);">${fmt(totalCont)}</div></div>
+          <div style="display:flex;flex-direction:column;gap:12px;margin-top:8px;">
+            <div><div style="font-size:9px;color:var(--muted);font-weight:800;margin-bottom:2px;">Fattura</div><div style="font-family:'Sora';font-size:20px;font-weight:800;color:var(--green);">${fmt(totalFatt)}</div></div>
+            <div><div style="font-size:9px;color:var(--muted);font-weight:800;margin-bottom:2px;">Contanti</div><div style="font-family:'Sora';font-size:20px;font-weight:800;color:var(--green);">${fmt(totalCont)}</div></div>
           </div>
         </div>
       </div>
     </div>
-    <div style="margin-top:16px;">${renderMonthComparison(month,year)}</div>
   </div>`;
 };
 
-// ═══════════════════════════════════════════════════
-// NICO — EXPENSES DETAIL VIEW
-// ═══════════════════════════════════════════════════
 const renderNicoExpensesView = (slot) => {
   const {month,year}=state.filters;
   const txs=state.transactions.filter(t=>inPeriod(t,month,year)&&t.kind==='expense').sort((a,b)=>new Date(b.date)-new Date(a.date));
@@ -896,207 +958,317 @@ const renderNicoExpensesView = (slot) => {
   const totNico=round(nicoTxs.reduce((s,t)=>s+t.nicoAmt,0));
   const cats={};
   nicoTxs.forEach(t=>{const cat=t.category||'Altro';cats[cat]=(cats[cat]||0)+t.nicoAmt;});
-  renderPeriodSelectors('Uscite Nico');
   slot.innerHTML=`<div class="page fade-up">
     <button class="btn-back" onclick="window.render('nico')">← Nico</button>
     <div class="page-header"><div class="page-title">Uscite</div><div class="page-sub">${getPeriodLabel()}</div></div>
     <div class="two-panel">
       <div class="card">
         <div class="tx-list">
-          ${nicoTxs.length?nicoTxs.map(t=>`
-            <div class="tx-item" onclick="window.openDetail('${t.id}')">
-              <div class="tx-dot" style="background:var(--red)"></div>
-              <div class="tx-info">
-                <div class="tx-label">${esc(t.desc||t.area.toUpperCase())}</div>
-                <div class="tx-meta">${t.area==='inlab'?'Inlab (tua metà)':'Personale'} · ${t.category||'Altro'} · ${fmtDate(t.date)}</div>
-              </div>
-              <div class="tx-amount neg">-${fmt(t.nicoAmt)}</div>
-            </div>`).join(''):'<div class="empty">Nessuna uscita</div>'}
+          ${nicoTxs.length?nicoTxs.map(t=>'<div class="tx-item" onclick="window.openDetail(\''+t.id+'\')">'+
+            '<div class="tx-dot" style="background:var(--red)"></div>'+
+            '<div class="tx-info"><div class="tx-label">'+esc(t.desc||t.area.toUpperCase())+'</div>'+
+            '<div class="tx-meta">'+(t.area==='inlab'?'Inlab (tua metà)':'Personale')+' · '+(t.category||'Altro')+' · '+fmtDate(t.date)+'</div></div>'+
+            '<div class="tx-amount neg">-'+fmt(t.nicoAmt)+'</div></div>').join(''):'<div class="empty">Nessuna uscita</div>'}
         </div>
       </div>
       <div>
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom:12px;">
           <div class="card-title">Totale</div>
-          <div style="font-family:'Sora';font-size:26px;font-weight:800;color:var(--red);">-${fmt(totNico)}</div>
+          <div style="font-family:'Sora';font-size:24px;font-weight:800;color:var(--red);">-${fmt(totNico)}</div>
         </div>
-        ${Object.keys(cats).length?`<div class="card"><div class="card-title">Per categoria</div><div style="margin-top:8px;">${Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.04);"><div style="font-size:13px;font-weight:700;">${esc(cat)}</div><div style="font-size:13px;font-weight:800;color:var(--red);">${fmt(amt)}</div></div>`).join('')}</div></div>`:''}
+        ${Object.keys(cats).length?'<div class="card"><div class="card-title">Per categoria</div><div style="margin-top:8px;">'+
+          Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([cat,amt])=>
+            '<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(0,0,0,0.04);">'+
+            '<div style="font-size:12px;font-weight:700;">'+esc(cat)+'</div>'+
+            '<div style="font-size:12px;font-weight:800;color:var(--red);">'+fmt(amt)+'</div></div>'
+          ).join('')+'</div></div>':''}
       </div>
     </div>
   </div>`;
 };
 
+// ═══════════════════════════════════════════════════
 // INLAB VIEW
 // ═══════════════════════════════════════════════════
 const renderInlabView = (slot) => {
   const {month,year}=state.filters;
-  const inlabTotal = calcInlabTotal(month,year);
-  const inlabExp   = calcInlabExpenses(month,year);
-  const bal        = calcInlabBalance(month,year);
+  const inlabTotal=calcInlabTotal(month,year);
+  const inlabExp=calcInlabExpenses(month,year);
+  const bal=calcInlabBalance(month,year);
   const list=state.transactions.filter(t=>inPeriod(t,month,year)&&t.area==='inlab').sort((a,b)=>new Date(b.date)-new Date(a.date));
-  const saldo = bal.saldo;
-  let balanceHtml='';
-  if(Math.abs(saldo)<0.01){
-    balanceHtml='<div style="padding:12px;background:rgba(16,185,129,0.08);border-radius:10px;text-align:center;font-size:13px;font-weight:800;color:var(--green);">✓ In pari</div>';
-  } else if(saldo>0){
-    balanceHtml=`<div style="padding:12px;background:rgba(0,0,0,0.04);border-radius:10px;"><div style="font-size:10px;color:var(--muted);font-weight:900;margin-bottom:4px;">NICO DEVE AD ILARIA</div><div style="font-family:'Sora';font-size:22px;font-weight:800;">${fmt(saldo)}</div></div>`;
-  } else {
-    balanceHtml=`<div style="padding:12px;background:rgba(239,68,68,0.05);border-radius:10px;"><div style="font-size:10px;color:var(--muted);font-weight:900;margin-bottom:4px;">ILARIA DEVE A NICO</div><div style="font-family:'Sora';font-size:22px;font-weight:800;color:var(--red);">${fmt(Math.abs(saldo))}</div></div>`;
-  }
-  renderPeriodSelectors('Inlab Core');
+  const saldo=bal.saldo;
+
+  const saldoHtml = Math.abs(saldo)<0.01
+    ? '<div style="padding:10px;background:rgba(16,185,129,0.08);border-radius:8px;text-align:center;font-size:12px;font-weight:800;color:var(--green);">✓ In pari</div>'
+    : saldo>0
+      ? '<div style="padding:10px;background:#f9fafb;border-radius:8px;"><div style="font-size:9px;font-weight:900;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Nico deve ad Ilaria</div><div style="font-family:\'Sora\';font-size:20px;font-weight:800;">'+fmt(saldo)+'</div></div>'
+      : '<div style="padding:10px;background:#fef2f2;border-radius:8px;"><div style="font-size:9px;font-weight:900;text-transform:uppercase;color:var(--muted);margin-bottom:2px;">Ilaria deve a Nico</div><div style="font-family:\'Sora\';font-size:20px;font-weight:800;color:var(--red);">'+fmt(Math.abs(saldo))+'</div></div>';
+
+  // Payments to Ilaria history
+  const transfers = state.transactions.filter(t=>t.kind==='transfer'&&(t.from==='nico'||t.to==='nico')).sort((a,b)=>new Date(b.date)-new Date(a.date)).slice(0,5);
+
+  const barData = MS_ABBR.map((l,i)=>({label:l,inc:calcInlabTotal(i+1,year),exp:calcInlabExpenses(i+1,year)}));
+
   slot.innerHTML=`<div class="page fade-up">
-    <div class="page-header"><div class="page-title">Inlab Core</div><div class="page-sub">${getPeriodLabel()}</div></div>
-    <div class="grid-3" style="margin-bottom:20px;">
+    <div class="page-header"><div class="page-title">Inlab</div><div class="page-sub">${getPeriodLabel()}</div></div>
+
+    <div class="grid-4" style="margin-bottom:16px;">
       <div class="kpi-card" style="border-left:3px solid #000;"><div class="kpi-label">Giro d'affari</div><div class="kpi-val">${fmt(inlabTotal)}</div></div>
       <div class="kpi-card" style="border-left:3px solid var(--red);"><div class="kpi-label">Spese Inlab</div><div class="kpi-val" style="color:var(--red);">-${fmt(inlabExp)}</div></div>
-      <div class="kpi-card" style="border-left:3px solid var(--green);"><div class="kpi-label">Netto</div><div class="kpi-val" style="color:var(--green);">${fmt(round(inlabTotal-inlabExp))}</div></div>
+      <div class="kpi-card" style="border-left:3px solid var(--green);"><div class="kpi-label">Quota Nico</div><div class="kpi-val" style="color:var(--green);">${fmt(bal.nicoShare)}</div></div>
+      <div class="kpi-card" style="border-left:3px solid var(--blue);"><div class="kpi-label">Quota Ilaria</div><div class="kpi-val" style="color:var(--blue);">${fmt(bal.ilariaShare)}</div></div>
     </div>
+
     <div class="two-panel">
       <div>
-        <div class="card" style="margin-bottom:16px;">
-          <div class="card-title" style="margin-bottom:12px;">Movimenti Inlab</div>
-          <div class="tx-list">
-            ${list.length?list.map(t=>`
-              <div class="tx-item" onclick="window.openDetail('${t.id}')">
-                <div class="tx-dot" style="background:${t.kind==='income'?'var(--green)':t.kind==='transfer'?'#8b5cf6':'var(--red)'}"></div>
-                <div class="tx-info">
-                  <div class="tx-label">${esc(t.desc||'Inlab')}</div>
-                  <div class="tx-meta">${fmtDate(t.date)}${t.collector?' · Inc.: '+t.collector:''}${t.paidBy?' · Pagato: '+t.paidBy:''}${t.kind==='transfer'?' · '+t.from+' → '+t.to:''}</div>
-                </div>
-                <div class="tx-amount ${t.kind==='income'?'pos':t.kind==='transfer'?'':'neg'}">${t.kind==='income'?'+':t.kind==='transfer'?'↔':'-'}${fmt(t.gross)}</div>
-              </div>`).join(''):'<div class="empty">Nessun movimento</div>'}
-          </div>
-        </div>
-        <button class="btn-primary full" onclick="window.openTransferModal()"><span>💸 Registra Trasferimento</span><span>›</span></button>
-      </div>
-      <div>
-        <div class="card" style="margin-bottom:14px;">
-          <div class="card-title" style="margin-bottom:10px;">Quote Soci</div>
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-            <div><div style="font-size:10px;font-weight:800;color:var(--muted);margin-bottom:2px;">Quota Nico</div><div style="font-family:'Sora';font-size:20px;font-weight:800;">${fmt(bal.nicoShare)}</div></div>
-            <div><div style="font-size:10px;font-weight:800;color:var(--muted);margin-bottom:2px;">Quota Ilaria</div><div style="font-family:'Sora';font-size:20px;font-weight:800;">${fmt(bal.ilariaShare)}</div></div>
-          </div>
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title">Andamento ${year}</div>
+          <div class="bar-chart" style="margin-top:8px;">${renderBarChart(barData,65)}</div>
         </div>
         <div class="card">
-          <div class="card-title" style="margin-bottom:10px;">Saldo tra Soci</div>
-          ${balanceHtml}
-          <div style="font-size:11px;color:var(--muted);font-weight:700;margin-top:8px;">Nico incassato: ${fmt(bal.nicoHaInc)} · Spettante: ${fmt(bal.nicoSpetta)}</div>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="card-title" style="margin-bottom:0;">Movimenti Inlab</div>
+            <button class="btn-ghost" style="font-size:10px;padding:4px 8px;" onclick="window.openTransferModal()">💸 Trasferimento</button>
+          </div>
+          <div class="tx-list">
+            ${list.length?list.map(t=>'<div class="tx-item" onclick="window.openDetail(\''+t.id+'\')">'+
+              '<div class="tx-dot" style="background:'+(t.kind==='income'?'var(--green)':t.kind==='transfer'?'var(--purple)':'var(--red)')+'"></div>'+
+              '<div class="tx-info"><div class="tx-label">'+esc(t.desc||'Inlab')+'</div>'+
+              '<div class="tx-meta">'+fmtDate(t.date)+(t.collector?' · Inc.: '+t.collector:'')+(t.paidBy?' · Pagato: '+t.paidBy:'')+(t.kind==='transfer'?' · '+t.from+' → '+t.to:'')+'</div></div>'+
+              '<div class="tx-amount '+(t.kind==='income'?'pos':t.kind==='transfer'?'':'neg')+'" style="'+(t.kind==='transfer'?'color:var(--purple);':'')+'">'+(t.kind==='income'?'+':t.kind==='transfer'?'↔':'-')+fmt(t.gross)+'</div>'+
+            '</div>').join(''):'<div class="empty">Nessun movimento</div>'}
+          </div>
+        </div>
+      </div>
+
+      <div>
+        <!-- Saldo soci -->
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title">Saldo tra soci</div>
+          <div style="margin-top:8px;">${saldoHtml}</div>
+          <div style="font-size:10px;color:var(--muted);font-weight:700;margin-top:8px;">
+            Nico ha incassato: ${fmt(bal.nicoHaInc)} · Spettante: ${fmt(bal.nicoSpetta)}
+          </div>
+        </div>
+
+        <!-- Trasferimenti recenti -->
+        <div class="card">
+          <div class="card-title">Pagamenti a Ilaria</div>
+          <div class="tx-list" style="margin-top:8px;">
+            ${transfers.length?transfers.map(t=>'<div class="tx-item">'+
+              '<div class="tx-dot" style="background:var(--purple)"></div>'+
+              '<div class="tx-info"><div class="tx-label">'+esc(t.desc||'Trasferimento')+'</div>'+
+              '<div class="tx-meta">'+fmtDate(t.date)+'</div></div>'+
+              '<div style="font-size:12px;font-weight:800;color:var(--purple);">'+fmt(t.gross)+'</div>'+
+            '</div>').join(''):'<div class="empty">Nessun trasferimento</div>'}
+          </div>
         </div>
       </div>
     </div>
   </div>`;
 };
 
+// ═══════════════════════════════════════════════════
+// ASSETS VIEW — analitica
+// ═══════════════════════════════════════════════════
 const renderAssetsView = (slot) => {
-  renderPeriodSelectors('Patrimonio');
+  const tot = getWealthTotal();
+  const liq = getLiquidTotal();
+  const inv = getInvestTotal();
+  const totV1 = round(state.assets.invest.reduce((s,i)=>s+(i.v1||0),0)+(state.assets.liquidInitial||0));
+  const diff = round(tot-totV1), diffPct = totV1>0?round((diff/totV1)*100):0;
+  const cy = getCompareYear();
+
+  // Wealth by month (from wealthHistory if available)
+  const wh = state.wealthHistory || {};
+  const curY = state.filters.year;
+  const whYear = wh[curY] || {};
+  const wealthBarData = MS_ABBR.map((l,i)=>({
+    label:l,
+    inc: whYear[i+1]?.total || 0,
+    exp: 0
+  }));
+  const hasWH = Object.keys(whYear).length > 0;
+
   slot.innerHTML=`<div class="page fade-up">
-    <div class="page-header"><div class="page-title">Patrimonio</div><div class="page-sub">${fmt(getWealthTotal())}</div></div>
+    <div class="page-header"><div class="page-title">Patrimonio</div><div class="page-sub">${fmt(tot)}</div></div>
+
+    <!-- KPI -->
+    <div class="grid-4" style="margin-bottom:16px;">
+      <div class="kpi-card" style="border-left:3px solid #000;">
+        <div class="kpi-label">Totale</div>
+        <div class="kpi-val big">${fmt(tot)}</div>
+        <div class="kpi-delta" style="color:${diff>=0?'var(--green)':'var(--red)'};">${diff>=0?'↑':'↓'} ${Math.abs(diffPct).toFixed(1)}% YTD</div>
+      </div>
+      <div class="kpi-card" style="border-left:3px solid var(--blue);">
+        <div class="kpi-label">Liquidità</div>
+        <div class="kpi-val">${fmt(liq)}</div>
+        <div class="kpi-delta">${(liq/tot*100).toFixed(1)}% del totale</div>
+      </div>
+      <div class="kpi-card" style="border-left:3px solid var(--green);">
+        <div class="kpi-label">Investimenti</div>
+        <div class="kpi-val">${fmt(inv)}</div>
+        <div class="kpi-delta">${(inv/tot*100).toFixed(1)}% del totale</div>
+      </div>
+      <div class="kpi-card" style="border-left:3px solid var(--amber);">
+        <div class="kpi-label">Crescita YTD</div>
+        <div class="kpi-val" style="color:${diff>=0?'var(--green)':'var(--red)'};">${fmt(diff)}</div>
+        <div class="kpi-delta">vs inizio ${state.filters.year}</div>
+      </div>
+    </div>
+
     <div class="two-panel">
       <div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <div class="section-label" style="margin:0;">Liquidità · ${fmt(getLiquidTotal())}</div>
-          <button class="chip active" onclick="window.openAddAssetModal('liquid')">＋ Aggiungi</button>
-        </div>
-        <div class="card" style="margin-bottom:20px;">
-          ${state.assets.liquid.map(acc=>`
-            <div class="tx-item">
-              <div class="tx-dot" style="background:${acc.color}"></div>
-              <div class="tx-info"><div class="tx-label">${esc(acc.name)}</div></div>
-              <div style="display:flex;align-items:center;gap:8px;">
-                <input class="amount-input inline-amount-input" type="number" inputmode="decimal" value="${acc.balance}" oninput="window.updateLiquidBalance('${acc.id}',this.value)"/>
-                ${window._assetConfirmId===acc.id?'<button style="background:var(--red);border:none;color:#fff;padding:3px 8px;border-radius:6px;font-size:10px;font-weight:800;cursor:pointer;" onclick="window.deleteAsset(\'liquid\',\''+acc.id+'\')"  >SICURO?</button>'  :'<button style="background:none;border:none;color:var(--red);font-size:14px;cursor:pointer;" onclick="window.deleteAsset(\'liquid\',\''+acc.id+'\')"  >✕</button>'}
+        <!-- Composizione torta + lista -->
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title">Composizione</div>
+          <div style="display:flex;align-items:center;gap:20px;margin-top:10px;">
+            <div class="donut-wrap" style="width:130px;height:130px;">
+              <canvas id="pie-wealth" width="130" height="130"></canvas>
+              <div class="donut-center">
+                <div style="font-size:9px;font-weight:800;color:#000;">TOTALE</div>
+                <div style="font-family:'Sora';font-size:11px;font-weight:800;">${fmt(tot)}</div>
               </div>
-            </div>`).join('')}
-        </div>
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-          <div class="section-label" style="margin:0;">Investimenti · ${fmt(getInvestTotal())}</div>
-          <button class="chip active" onclick="window.openAddAssetModal('invest')">＋ Aggiungi</button>
-        </div>
-        <div class="card">
-          ${state.assets.invest.map(inv=>`
-            <div class="tx-item">
-              <div class="tx-dot" style="background:${inv.color};cursor:pointer;" onclick="window.openInvestDetail('${inv.id}')"></div>
-              <div class="tx-info" onclick="window.openInvestDetail('${inv.id}')" style="cursor:pointer;">
-                <div class="tx-label">${esc(inv.name)}</div>
-                ${inv.rec?'<div class="pac-badge">● PAC '+fmt(inv.rec.amt)+'</div>':''}
+            </div>
+            <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;">
+                <span style="display:flex;align-items:center;gap:5px;font-weight:700;"><span style="width:8px;height:8px;border-radius:50%;background:#000;"></span>Liquidità</span>
+                <span style="font-weight:800;">${fmt(liq)}</span>
               </div>
-              <div class="tx-amount" onclick="window.openInvestDetail('${inv.id}')" style="cursor:pointer;">${fmt(inv.balance)}</div>
-              ${window._assetConfirmId===inv.id?'<button style="background:var(--red);border:none;color:#fff;padding:3px 8px;border-radius:6px;font-size:10px;font-weight:800;cursor:pointer;margin-left:8px;" onclick="window.deleteAsset(\'invest\',\''+inv.id+'\')"  >SICURO?</button>'  :'<button style="background:none;border:none;color:var(--red);font-size:14px;cursor:pointer;margin-left:8px;" onclick="window.deleteAsset(\'invest\',\''+inv.id+'\')"  >✕</button>'}
-            </div>`).join('')}
+              ${state.assets.invest.map(i=>'<div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;">'+
+                '<span style="display:flex;align-items:center;gap:5px;font-weight:700;"><span style="width:8px;height:8px;border-radius:50%;background:'+i.color+';"></span>'+esc(i.name)+'</span>'+
+                '<span style="font-weight:800;">'+fmt(i.balance)+'</span></div>'
+              ).join('')}
+            </div>
+          </div>
         </div>
+
+        <!-- Evoluzione -->
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title">Evoluzione patrimonio ${curY}</div>
+          <div style="height:130px;position:relative;margin-top:8px;"><canvas id="evolution-chart"></canvas></div>
+        </div>
+
+        <!-- Confronto anni -->
+        ${cy?renderAnnualComparison(state.filters.year):''}
       </div>
+
       <div>
+        <!-- Liquidità -->
+        <div class="card" style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="card-title" style="margin-bottom:0;">Liquidità · ${fmt(liq)}</div>
+            <button class="chip active" onclick="window.openAddAssetModal('liquid')">＋</button>
+          </div>
+          ${state.assets.liquid.map(acc=>'<div class="tx-item">'+
+            '<div class="tx-dot" style="background:'+acc.color+'"></div>'+
+            '<div class="tx-info"><div class="tx-label">'+esc(acc.name)+'</div></div>'+
+            '<div style="display:flex;align-items:center;gap:6px;">'+
+              '<input class="amount-input inline-amount-input" type="number" inputmode="decimal" value="'+acc.balance+'" oninput="window.updateLiquidBalance(\''+acc.id+'\',this.value)"/>'+
+              (window._assetConfirmId===acc.id
+                ? '<button style="background:var(--red);border:none;color:#fff;border-radius:4px;font-size:9px;font-weight:800;padding:2px 6px;cursor:pointer;" onclick="window.deleteAsset(\'liquid\',\''+acc.id+'\')">Sicuro?</button>'
+                : '<button style="background:none;border:none;color:var(--red);font-size:13px;cursor:pointer;" onclick="window.deleteAsset(\'liquid\',\''+acc.id+'\')">✕</button>')+
+            '</div></div>'
+          ).join('')}
+        </div>
+
+        <!-- Investimenti -->
+        <div class="card" style="margin-bottom:12px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div class="card-title" style="margin-bottom:0;">Investimenti · ${fmt(inv)}</div>
+            <button class="chip active" onclick="window.openAddAssetModal('invest')">＋</button>
+          </div>
+          ${state.assets.invest.map(i=>{
+            const gain = round(i.balance-i.v1);
+            const gPct = i.v1>0?round((gain/i.v1)*100):0;
+            return '<div class="tx-item" onclick="window.openInvestDetail(\''+i.id+'\')">'+
+              '<div class="tx-dot" style="background:'+i.color+';cursor:pointer;"></div>'+
+              '<div class="tx-info">'+
+                '<div class="tx-label">'+esc(i.name)+'</div>'+
+                '<div class="tx-meta" style="color:'+(gain>=0?'var(--green)':'var(--red)')+';">'+(gain>=0?'↑':'↓')+' '+Math.abs(gPct).toFixed(1)+'% YTD</div>'+
+              '</div>'+
+              '<div style="text-align:right;">'+
+                '<div style="font-size:13px;font-weight:800;">'+fmt(i.balance)+'</div>'+
+                (i.rec?'<div class="pac-badge">PAC '+fmt(i.rec.amt)+'</div>':'')+
+              '</div>'+
+              (window._assetConfirmId===i.id
+                ? '<button style="background:var(--red);border:none;color:#fff;border-radius:4px;font-size:9px;font-weight:800;padding:2px 6px;cursor:pointer;margin-left:6px;" onclick="window.deleteAsset(\'invest\',\''+i.id+'\')">Sicuro?</button>'
+                : '<button style="background:none;border:none;color:var(--red);font-size:13px;cursor:pointer;margin-left:6px;" onclick="window.deleteAsset(\'invest\',\''+i.id+'\')">✕</button>')+
+            '</div>';
+          }).join('')}
+        </div>
+
+        <!-- Settings -->
         <div class="card">
-          <div class="card-title">Impostazioni</div>
-          <label class="form-label" style="margin-top:10px;">Liquidità totale al 1 Gen ${state.filters.year}</label>
+          <div class="card-title">Impostazioni anno</div>
+          <label class="form-label" style="margin-top:8px;">Liquidità al 1 Gen ${state.filters.year}</label>
           <input class="form-input" type="number" value="${state.assets.liquidInitial||0}" onchange="window.updateAssetSetting('liquidInitial',this.value)"/>
-          <div style="font-size:11px;color:var(--muted);margin-top:6px;font-weight:600;">Usato per calcolare la crescita % annuale del patrimonio</div>
         </div>
       </div>
     </div>
   </div>`;
+  setTimeout(()=>{ initWealthPie(); initEvolutionChart(); },100);
 };
 
 const renderInvestDetail = (slot) => {
   const inv=getInvestById(state.activeInvestId);
   if(!inv) return render('assets');
   if(inv.v0===undefined) inv.v0=inv.v1;
-  const curYear = state.filters.year;
-  const addsYTD = (inv.hist||[]).filter(h=>new Date(h.date).getFullYear()===curYear).reduce((s,h)=>s+(h.kind==='rem'?-h.amt:h.amt),0);
-  const addsAll = (inv.hist||[]).reduce((s,h)=>s+(h.kind==='rem'?-h.amt:h.amt),0);
-  const gainYTD=round(inv.balance-inv.v1-addsYTD), costYTD=inv.v1+addsYTD;
+  const curYear=state.filters.year;
+  const addsYTD=(inv.hist||[]).filter(h=>new Date(h.date).getFullYear()===curYear).reduce((s,h)=>s+(h.kind==='rem'?-h.amt:h.amt),0);
+  const addsAll=(inv.hist||[]).reduce((s,h)=>s+(h.kind==='rem'?-h.amt:h.amt),0);
+  const gainYTD=round(inv.balance-inv.v1-addsYTD),costYTD=inv.v1+addsYTD;
   const pctYTD=costYTD>0?round((gainYTD/costYTD)*100):0;
-  const gainAllTime=round(inv.balance-inv.v0-addsAll), costAll=inv.v0+addsAll;
+  const gainAllTime=round(inv.balance-inv.v0-addsAll),costAll=inv.v0+addsAll;
   const pctAllTime=costAll>0?round((gainAllTime/costAll)*100):0;
-  renderPeriodSelectors('Portfolio');
   slot.innerHTML=`<div class="page fade-up">
     <button class="btn-back" onclick="window.render('assets')">← Patrimonio</button>
     <div class="page-header"><div class="page-title">${esc(inv.name)}</div><div class="page-sub">Asset Profilo</div></div>
     <div class="two-panel">
       <div>
-        <div class="grid-2" style="margin-bottom:16px;">
+        <div class="grid-2" style="margin-bottom:12px;">
           <div class="kpi-card" style="border-left:3px solid #000;"><div class="kpi-label">Valore Attuale</div><div class="kpi-val">${fmt(inv.balance)}</div></div>
           <div class="kpi-card" style="border-left:3px solid ${gainYTD>=0?'var(--green)':'var(--red)'};"><div class="kpi-label">Rendimento YTD</div><div class="kpi-val" style="color:${gainYTD>=0?'var(--green)':'var(--red)'};">${pct(pctYTD)}</div><div class="kpi-delta">${fmt(gainYTD)}</div></div>
         </div>
-        <div class="card" style="margin-bottom:16px;">
+        <div class="card" style="margin-bottom:12px;">
           <div class="card-title">Andamento ${state.filters.year}</div>
-          <div style="height:200px;position:relative;margin-top:10px;"><canvas id="invest-history-chart"></canvas></div>
+          <div style="height:180px;position:relative;margin-top:8px;"><canvas id="invest-history-chart"></canvas></div>
         </div>
-        <div style="display:flex;gap:10px;margin-bottom:16px;">
+        <div style="display:flex;gap:8px;margin-bottom:12px;">
           <button class="btn-primary" style="flex:1;background:var(--green);" onclick="window.openInvestTxModal('${inv.id}','add')">Acquista</button>
           <button class="btn-primary" style="flex:1;background:var(--red);" onclick="window.openInvestTxModal('${inv.id}','rem')">Vendi</button>
         </div>
+        <div class="card">
+          <div class="kpi-label">Rendimento Totale</div>
+          <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${gainAllTime>=0?'var(--green)':'var(--red)'};">${pct(pctAllTime)} (${fmt(gainAllTime)})</div>
+        </div>
       </div>
       <div>
-        <div class="card" style="margin-bottom:14px;">
-          <div class="card-title" style="margin-bottom:12px;">PAC — Investimento ricorrente</div>
-          ${inv.rec?`<div style="display:flex;justify-content:space-between;align-items:center;">
-            <div><div style="font-size:15px;font-weight:800;">${fmt(inv.rec.amt)} / mese</div><div style="font-size:11px;color:var(--muted);font-weight:700;">Giorno ${inv.rec.day}</div></div>
-            <button class="chip active" onclick="window.openPacModal('${inv.id}')">Gestisci</button>
-          </div>`:`<button class="btn-ghost" style="width:100%;" onclick="window.openPacModal('${inv.id}')">＋ Attiva PAC</button>`}
+        <div class="card" style="margin-bottom:12px;">
+          <div class="card-title" style="margin-bottom:10px;">PAC</div>
+          ${inv.rec?'<div style="display:flex;justify-content:space-between;align-items:center;"><div><div style="font-size:14px;font-weight:800;">'+fmt(inv.rec.amt)+' / mese</div><div style="font-size:10px;color:var(--muted);">Giorno '+inv.rec.day+'</div></div><button class="chip active" onclick="window.openPacModal(\''+inv.id+'\')">Gestisci</button></div>'
+          :'<button class="btn-ghost" style="width:100%;" onclick="window.openPacModal(\''+inv.id+'\')">＋ Attiva PAC</button>'}
         </div>
         <div class="card">
-          <div class="card-title" style="margin-bottom:12px;">Impostazioni</div>
-          <div class="form-group"><label class="form-label">Valore Iniziale Storico (v0)</label><input class="form-input" type="number" value="${inv.v0||0}" onchange="window.updateInvestProp('${inv.id}','v0',this.value)"/></div>
-          <div class="form-group"><label class="form-label">Valore 1 Gen ${state.filters.year}</label><input class="form-input" type="number" value="${inv.v1}" onchange="window.updateInvestProp('${inv.id}','v1',this.value)"/></div>
-          <div class="form-group"><label class="form-label">Aggiunte ${curYear}</label><div style="background:rgba(0,0,0,0.03);padding:10px 14px;border-radius:10px;font-weight:800;">${fmt(addsYTD)}</div></div>
-          <div class="form-group"><label class="form-label">Valore Corrente (Manuale)</label><input class="form-input" type="number" value="${inv.balance}" onchange="window.updateInvestProp('${inv.id}','balance',this.value)"/></div>
-          <div style="display:flex;gap:8px;margin-top:4px;">
-            <div class="kpi-card" style="flex:1;"><div class="kpi-label">Rendimento Totale</div><div style="font-family:'Sora';font-size:16px;font-weight:800;color:${gainAllTime>=0?'var(--green)':'var(--red)'};">${pct(pctAllTime)} (${fmt(gainAllTime)})</div></div>
-          </div>
+          <div class="card-title" style="margin-bottom:10px;">Impostazioni</div>
+          <div class="form-group"><label class="form-label">Valore storico (v0)</label><input class="form-input" type="number" value="${inv.v0||0}" onchange="window.updateInvestProp('${inv.id}','v0',this.value)"/></div>
+          <div class="form-group"><label class="form-label">Valore 1 Gen ${curYear}</label><input class="form-input" type="number" value="${inv.v1}" onchange="window.updateInvestProp('${inv.id}','v1',this.value)"/></div>
+          <div class="form-group"><label class="form-label">Aggiunte ${curYear}</label><div style="background:#f9fafb;padding:8px 12px;border-radius:8px;font-weight:800;">${fmt(addsYTD)}</div></div>
+          <div class="form-group"><label class="form-label">Valore corrente</label><input class="form-input" type="number" value="${inv.balance}" onchange="window.updateInvestProp('${inv.id}','balance',this.value)"/></div>
         </div>
-        <div id="asset-cmp"></div>
+        <div id="asset-cmp" style="margin-top:12px;"></div>
       </div>
     </div>
   </div>`;
-  // inject asset comparison
   setTimeout(()=>{
     initInvestHistoryChart(inv.id);
-    const aslot = document.getElementById('asset-cmp');
-    if(aslot) aslot.innerHTML = renderAssetComparison(inv);
+    const aslot=document.getElementById('asset-cmp');
+    if(aslot) aslot.innerHTML=renderAssetComparison(inv);
   },100);
 };
 
-// MOVEMENTS VIEW (con filtri)
+// ═══════════════════════════════════════════════════
+// MOVEMENTS VIEW
 // ═══════════════════════════════════════════════════
 const renderMovementsView = (slot) => {
   const {month,year}=state.filters;
@@ -1104,14 +1276,13 @@ const renderMovementsView = (slot) => {
   let list=state.transactions.filter(t=>inPeriod(t,month,year));
   if(kind!=='all') list=list.filter(t=>t.kind===kind);
   if(area!=='all') list=list.filter(t=>t.area===area||t.kind==='transfer');
-  if(search.trim()) list=list.filter(t=>(t.desc||''). toLowerCase().includes(search.toLowerCase()));
+  if(search.trim()) list=list.filter(t=>(t.desc||'').toLowerCase().includes(search.toLowerCase()));
   list=list.sort((a,b)=>new Date(b.date)-new Date(a.date));
-  renderPeriodSelectors('Movimenti');
   slot.innerHTML=`<div class="page fade-up">
     <div class="page-header"><div class="page-title">Movimenti</div><div class="page-sub">${getPeriodLabel()} · ${list.length} voci</div></div>
     <div class="two-panel">
       <div class="card">
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">
+        <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:10px;">
           <button class="chip ${kind==='all'?'active':''}" onclick="window.setTxFilter('kind','all')">Tutto</button>
           <button class="chip ${kind==='income'?'active':''}" onclick="window.setTxFilter('kind','income')">Entrate</button>
           <button class="chip ${kind==='expense'?'active':''}" onclick="window.setTxFilter('kind','expense')">Uscite</button>
@@ -1120,11 +1291,11 @@ const renderMovementsView = (slot) => {
           <button class="chip ${area==='nico'?'active':''}" onclick="window.setTxFilter('area','nico')">Nico</button>
           <button class="chip ${area==='inlab'?'active':''}" onclick="window.setTxFilter('area','inlab')">Inlab</button>
         </div>
-        <input class="form-input" style="margin-bottom:16px;" placeholder="🔍 Cerca per parola chiave..." value="${esc(search)}" oninput="window.setTxSearch(this.value)"/>
+        <input class="form-input" style="margin-bottom:12px;" placeholder="🔍 Cerca..." value="${esc(search)}" oninput="window.setTxSearch(this.value)"/>
         <div class="tx-list">
           ${list.length?list.map(t=>{
             const isT=t.kind==='transfer';
-            const dot=t.kind==='income'?'var(--green)':isT?'#8b5cf6':'var(--red)';
+            const dot=t.kind==='income'?'var(--green)':isT?'var(--purple)':'var(--red)';
             const cls=t.kind==='income'?'pos':'neg';
             const pfx=t.kind==='income'?'+':isT?'↔':'-';
             let meta=t.area.toUpperCase();
@@ -1133,20 +1304,20 @@ const renderMovementsView = (slot) => {
             if(isT) meta='Trasf. '+t.from+' → '+t.to;
             if(t.category) meta+=' · '+t.category;
             meta+=' · '+fmtDate(t.date);
-            return `<div class="tx-item" onclick="window.openDetail('${t.id}')">
-              <div class="tx-dot" style="background:${dot}"></div>
-              <div class="tx-info"><div class="tx-label">${esc(t.desc||(t.area==='nico'?'Nico':'Inlab'))}</div><div class="tx-meta">${meta}</div></div>
-              <div class="tx-amount ${isT?'':cls}" style="${isT?'color:#8b5cf6;':''}">${pfx}${fmt(t.gross)}</div>
-            </div>`;
+            return '<div class="tx-item" onclick="window.openDetail(\''+t.id+'\')">'+
+              '<div class="tx-dot" style="background:'+dot+'"></div>'+
+              '<div class="tx-info"><div class="tx-label">'+esc(t.desc||(t.area==='nico'?'Nico':'Inlab'))+'</div><div class="tx-meta">'+meta+'</div></div>'+
+              '<div class="tx-amount '+(isT?'':cls)+'" style="'+(isT?'color:var(--purple);':'')+'">'+ pfx+fmt(t.gross)+'</div>'+
+            '</div>';
           }).join(''):'<div class="empty">Nessun movimento</div>'}
         </div>
       </div>
       <div>
         <div class="card">
-          <div class="card-title">Riepilogo periodo</div>
-          <div style="display:flex;flex-direction:column;gap:12px;margin-top:10px;">
-            <div><div style="font-size:10px;font-weight:800;color:var(--muted);margin-bottom:2px;">Entrate</div><div style="font-family:'Sora';font-size:20px;font-weight:800;color:var(--green);">+${fmt(list.filter(t=>t.kind==='income').reduce((s,t)=>s+(parseFloat(t.gross)||0),0))}</div></div>
-            <div><div style="font-size:10px;font-weight:800;color:var(--muted);margin-bottom:2px;">Uscite</div><div style="font-family:'Sora';font-size:20px;font-weight:800;color:var(--red);">-${fmt(list.filter(t=>t.kind==='expense').reduce((s,t)=>s+(parseFloat(t.gross)||0),0))}</div></div>
+          <div class="card-title">Riepilogo</div>
+          <div style="display:flex;flex-direction:column;gap:10px;margin-top:8px;">
+            <div><div style="font-size:9px;font-weight:800;color:var(--muted);margin-bottom:1px;">Entrate</div><div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--green);">+${fmt(list.filter(t=>t.kind==='income').reduce((s,t)=>s+(parseFloat(t.gross)||0),0))}</div></div>
+            <div><div style="font-size:9px;font-weight:800;color:var(--muted);margin-bottom:1px;">Uscite</div><div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">-${fmt(list.filter(t=>t.kind==='expense').reduce((s,t)=>s+(parseFloat(t.gross)||0),0))}</div></div>
           </div>
         </div>
       </div>
@@ -1154,34 +1325,41 @@ const renderMovementsView = (slot) => {
   </div>`;
 };
 
-window.setTxFilter = (key, val) => {
-  state.txFilters[key]=val;
-  render('movements');
-};
-window.setTxSearch = val => {
-  state.txFilters.search=val;
-  render('movements');
-};
+window.setTxFilter=(key,val)=>{state.txFilters[key]=val;render('movements');};
+window.setTxSearch=val=>{state.txFilters.search=val;render('movements');};
 
 // ═══════════════════════════════════════════════════
 // CLIENTS VIEW
 // ═══════════════════════════════════════════════════
 const renderClientsView = (slot) => {
-  const stipendio = calcStipendioStimato();
-  let {clientSearch='',clientArea='all',clientPay='all'} = state.clientFilters || {};
-  let clients = state.clients;
+  const stipendio=calcStipendioStimato();
+  let {clientSearch='',clientArea='all',clientPay='all'}=state.clientFilters||{};
+  let clients=state.clients;
   if(clientArea!=='all') clients=clients.filter(c=>c.area===clientArea);
-  if(clientPay!=='all')  clients=clients.filter(c=>c.payMode===clientPay);
+  if(clientPay!=='all') clients=clients.filter(c=>c.payMode===clientPay);
   if(clientSearch.trim()) clients=clients.filter(c=>c.name.toLowerCase().includes(clientSearch.toLowerCase()));
-  renderPeriodSelectors('CRM Clienti');
+  const debts = state.debts||[];
+  const totalDue = getMonthlyOutstanding().reduce((s,i)=>s+i.missing,0);
+  const totalDebts = debts.filter(d=>!d.settled).reduce((s,d)=>s+(parseFloat(d.amount)||0),0);
+
   slot.innerHTML=`<div class="page fade-up">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-      <div class="page-header" style="margin-bottom:0;"><div class="page-title">CRM Clienti</div><div class="page-sub">Gestione Anagrafica</div></div>
-      <button class="btn-primary" onclick="window.openAddClientModal()">＋ Nuovo Cliente</button>
+      <div class="page-header" style="margin-bottom:0;"><div class="page-title">Clienti & Debiti</div></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn-ghost" onclick="window.openAddDebtModal()">＋ Debito</button>
+        <button class="btn-primary" onclick="window.openAddClientModal()">＋ Cliente</button>
+      </div>
     </div>
+
+    <div class="grid-3" style="margin-bottom:16px;">
+      <div class="kpi-card" style="border-left:3px solid var(--blue);"><div class="kpi-label">Stipendio Stimato</div><div class="kpi-val" style="color:var(--blue);">${fmt(stipendio)}</div></div>
+      <div class="kpi-card" style="border-left:3px solid var(--amber);"><div class="kpi-label">Da incassare (clienti)</div><div class="kpi-val" style="color:var(--amber);">${fmt(totalDue)}</div></div>
+      <div class="kpi-card" style="border-left:3px solid var(--purple);"><div class="kpi-label">Debiti aperti</div><div class="kpi-val" style="color:var(--purple);">${fmt(totalDebts)}</div></div>
+    </div>
+
     <div class="two-panel">
       <div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;">
+        <div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:8px;">
           <button class="chip ${clientArea==='all'?'active':''}" onclick="window.setClientFilter('clientArea','all')">Tutti</button>
           <button class="chip ${clientArea==='nico'?'active':''}" onclick="window.setClientFilter('clientArea','nico')">Nico</button>
           <button class="chip ${clientArea==='inlab'?'active':''}" onclick="window.setClientFilter('clientArea','inlab')">Inlab</button>
@@ -1190,58 +1368,71 @@ const renderClientsView = (slot) => {
           <button class="chip ${clientPay==='fatt'?'active':''}" onclick="window.setClientFilter('clientPay','fatt')">Fattura</button>
           <button class="chip ${clientPay==='cont'?'active':''}" onclick="window.setClientFilter('clientPay','cont')">Contanti</button>
         </div>
-        <input class="form-input" style="margin-bottom:14px;" placeholder="🔍 Cerca cliente..." value="${esc(clientSearch)}" id="client-search-input" oninput="window.setClientSearch(this.value)"/>
+        <input class="form-input" style="margin-bottom:10px;" placeholder="🔍 Cerca cliente..." value="${esc(clientSearch)}" id="client-search-input" oninput="window.setClientSearch(this.value)"/>
         <div class="card">
           <div class="tx-list" id="clients-list">
             ${clients.map(c=>{
-              const {missing}=calcClientStatus(c.id);
-              const dot=!c.active?'var(--muted)':missing>0.01?'var(--amber)':'var(--green)';
+              const outstanding=getMonthlyOutstanding().filter(i=>i.client.id===c.id);
+              const totalMissing=outstanding.reduce((s,i)=>s+i.missing,0);
+              const dot=!c.active?'var(--muted)':totalMissing>0.01?'var(--amber)':'var(--green)';
               const lordo=c.monthlyAmount||c.expectedAmount||0;
-              const nettoNico=(()=>{
-                if(c.area==='nico') return c.payMode==='fatt'?round(lordo*0.75):lordo;
-                const net=c.payMode==='fatt'?round(lordo*0.75):lordo;
-                return round(net*0.5);
-              })();
-              return `<div class="tx-item" onclick="window.openClientDetail('${c.id}')" data-client-id="${c.id}" data-client-name="${esc(c.name)}">
-                <div class="tx-dot" style="background:${dot}"></div>
-                <div class="tx-info">
-                  <div class="tx-label">${esc(c.name)}</div>
-                  <div class="tx-meta">${c.area.toUpperCase()} · ${c.payMode==='fatt'?'Fattura':'Contanti'}${c.recurring?' · gg.'+c.recurringDay:''} · ${c.active?'Attivo':'Archiviato'}</div>
-                </div>
-                <div style="text-align:right;flex-shrink:0;">
-                  <div style="font-size:13px;font-weight:800;color:#000;">${fmt(nettoNico)}/m</div>
-                  ${missing>0.01?'<div style="font-size:11px;color:var(--red);font-weight:700;">-'+fmt(missing)+'</div>':''}
-                </div>
-              </div>`;
+              const nettoNico=c.area==='nico'?(c.payMode==='fatt'?round(lordo*0.75):lordo):(c.payMode==='fatt'?round(lordo*0.75*0.5):round(lordo*0.5));
+              return '<div class="tx-item" onclick="window.openClientDetail(\''+c.id+'\')" data-client-id="'+c.id+'" data-client-name="'+esc(c.name)+'">'+
+                '<div class="tx-dot" style="background:'+dot+'"></div>'+
+                '<div class="tx-info"><div class="tx-label">'+esc(c.name)+'</div>'+
+                '<div class="tx-meta">'+c.area.toUpperCase()+' · '+(c.payMode==='fatt'?'Fattura':'Contanti')+(c.recurring?' · gg.'+c.recurringDay:'')+' · '+(c.active?'Attivo':'Archiviato')+'</div></div>'+
+                '<div style="text-align:right;flex-shrink:0;">'+
+                  '<div style="font-size:12px;font-weight:800;">'+fmt(nettoNico)+'/m</div>'+
+                  (totalMissing>0.01?'<div style="font-size:10px;color:var(--red);font-weight:800;">-'+fmt(totalMissing)+'</div>':'')+
+                '</div></div>';
             }).join('')}
           </div>
         </div>
       </div>
+
+      <!-- Debiti -->
       <div>
-        <div class="card" style="background:linear-gradient(135deg,#1756d8,#2f7aff);border:none;margin-bottom:14px;">
-          <div class="card-title" style="color:rgba(255,255,255,0.7);">Stipendio Stimato Mensile</div>
-          <div style="font-family:'Sora';font-size:32px;font-weight:800;color:#fff;margin-top:4px;">${fmt(stipendio)}</div>
-          <div style="font-size:10px;color:rgba(255,255,255,0.55);margin-top:6px;font-weight:700;">Clienti attivi × quota Nico</div>
+        <div class="card">
+          <div class="card-title" style="margin-bottom:10px;">Debiti aperti</div>
+          <div class="tx-list">
+            ${debts.filter(d=>!d.settled).length?debts.filter(d=>!d.settled).map(d=>
+              '<div class="tx-item">'+
+                '<div class="tx-dot" style="background:var(--purple)"></div>'+
+                '<div class="tx-info"><div class="tx-label">'+esc(d.name)+'</div>'+
+                '<div class="tx-meta">'+fmtDate(d.date)+(d.note?' · '+esc(d.note):'')+'</div></div>'+
+                '<div style="display:flex;align-items:center;gap:6px;">'+
+                  '<div style="font-size:13px;font-weight:800;color:var(--purple);">'+fmt(d.amount)+'</div>'+
+                  '<button onclick="window.settleDebt(\''+d.id+'\')" style="background:var(--purple);border:none;color:#fff;border-radius:5px;font-size:9px;font-weight:800;padding:3px 6px;cursor:pointer;">Saldato</button>'+
+                  '<button onclick="window.deleteDebt(\''+d.id+'\')" style="background:none;border:none;color:var(--red);font-size:13px;cursor:pointer;">✕</button>'+
+                '</div>'+
+              '</div>'
+            ).join(''):'<div class="empty">Nessun debito aperto</div>'}
+          </div>
+          ${debts.filter(d=>d.settled).length?'<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">'+
+            '<div style="font-size:9px;font-weight:900;text-transform:uppercase;color:var(--muted);margin-bottom:8px;">Saldati</div>'+
+            debts.filter(d=>d.settled).map(d=>
+              '<div class="tx-item">'+
+                '<div class="tx-dot" style="background:var(--green)"></div>'+
+                '<div class="tx-info"><div class="tx-label">'+esc(d.name)+'</div><div class="tx-meta">'+fmtDate(d.date)+'</div></div>'+
+                '<div style="font-size:12px;font-weight:800;color:var(--muted);">'+fmt(d.amount)+'</div>'+
+              '</div>'
+            ).join('')+'</div>':''}
         </div>
       </div>
     </div>
   </div>`;
 };
 
-window.setClientFilter = (key, val) => {
-  if(!state.clientFilters) state.clientFilters={};
-  state.clientFilters[key]=val;
-  render('clients');
-};
-window.setClientSearch = val => {
-  if(!state.clientFilters) state.clientFilters={};
+window.setClientFilter=(key,val)=>{if(!state.clientFilters)state.clientFilters={};state.clientFilters[key]=val;render('clients');};
+window.setClientSearch=val=>{
+  if(!state.clientFilters)state.clientFilters={};
   state.clientFilters.clientSearch=val;
-  const v = val.trim().toLowerCase();
-  const list = document.getElementById('clients-list');
-  if(!list){ render('clients'); return; }
-  list.querySelectorAll('.tx-item[data-client-id]').forEach(el => {
-    const name = (el.dataset.clientName||'').toLowerCase();
-    el.style.display = (!v || name.includes(v)) ? '' : 'none';
+  const v=val.trim().toLowerCase();
+  const list=document.getElementById('clients-list');
+  if(!list){render('clients');return;}
+  list.querySelectorAll('.tx-item[data-client-id]').forEach(el=>{
+    const name=(el.dataset.clientName||'').toLowerCase();
+    el.style.display=(!v||name.includes(v))?'':'none';
   });
 };
 
@@ -1249,488 +1440,165 @@ window.setClientSearch = val => {
 // TAXES VIEW
 // ═══════════════════════════════════════════════════
 const renderTaxesView = (slot) => {
-  const curYear = new Date().getFullYear();
-  const prevYear = curYear - 1;
-  const accrualPrev = calcTaxAccrual(prevYear);
-  const paidPrev    = calcTaxPaid(prevYear);
-  const remainPrev  = round(accrualPrev - paidPrev);
-  const accrualCur  = calcTaxAccrual(curYear);
-  const paymentsPrev = state.taxPayments[prevYear] || [];
-  const yearsWithData = new Set([curYear, prevYear]);
+  const curYear=new Date().getFullYear(), prevYear=curYear-1;
+  const accrualPrev=calcTaxAccrual(prevYear), paidPrev=calcTaxPaid(prevYear), remainPrev=round(accrualPrev-paidPrev);
+  const accrualCur=calcTaxAccrual(curYear);
+  const paymentsPrev=state.taxPayments[prevYear]||[];
+  const yearsWithData=new Set([curYear,prevYear]);
   state.transactions.forEach(t=>{const y=new Date(t.date).getFullYear();if(y)yearsWithData.add(y);});
   Object.keys(state.taxPayments).forEach(y=>yearsWithData.add(parseInt(y)));
-  const sortedYears = Array.from(yearsWithData).sort((a,b)=>b-a);
-  renderPeriodSelectors('Tasse');
+  const sortedYears=Array.from(yearsWithData).sort((a,b)=>b-a);
   slot.innerHTML=`<div class="page fade-up">
     <div class="page-header"><div class="page-title">Conto Tasse</div></div>
     <div class="two-panel">
       <div>
-        <div class="card" style="border-left:4px solid var(--amber);margin-bottom:16px;">
+        <div class="card" style="border-left:4px solid var(--amber);margin-bottom:12px;">
           <div class="card-title">Da pagare · Anno ${prevYear}</div>
-          <div style="font-family:'Sora';font-size:36px;font-weight:800;letter-spacing:-0.04em;color:${remainPrev>0?'var(--red)':'var(--green)'};">${fmt(remainPrev)}</div>
-          <div style="display:flex;justify-content:space-between;margin-top:16px;padding-top:14px;border-top:1px solid rgba(0,0,0,0.06);">
-            <div><div style="font-size:10px;font-weight:900;color:var(--muted);margin-bottom:2px;">Tasse ${prevYear}</div><div style="font-family:'Sora';font-size:18px;font-weight:800;">${fmt(accrualPrev)}</div></div>
-            <div style="text-align:right;"><div style="font-size:10px;font-weight:900;color:var(--muted);margin-bottom:2px;">Già pagato</div><div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--green);">${fmt(paidPrev)}</div></div>
+          <div style="font-family:'Sora';font-size:32px;font-weight:800;color:${remainPrev>0?'var(--red)':'var(--green)'};">${fmt(remainPrev)}</div>
+          <div style="display:flex;justify-content:space-between;margin-top:12px;padding-top:12px;border-top:1px solid rgba(0,0,0,0.06);">
+            <div><div style="font-size:9px;font-weight:900;color:var(--muted);margin-bottom:1px;">Tasse ${prevYear}</div><div style="font-family:'Sora';font-size:16px;font-weight:800;">${fmt(accrualPrev)}</div></div>
+            <div style="text-align:right;"><div style="font-size:9px;font-weight:900;color:var(--muted);margin-bottom:1px;">Già pagato</div><div style="font-family:'Sora';font-size:16px;font-weight:800;color:var(--green);">${fmt(paidPrev)}</div></div>
           </div>
         </div>
-        ${paymentsPrev.length?`<div class="card" style="margin-bottom:14px;">
-          <div class="card-title" style="margin-bottom:10px;">Pagamenti registrati ${prevYear}</div>
-          ${paymentsPrev.map(p=>`<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.04);">
-            <div><div style="font-size:13px;font-weight:700;">${fmtDate(p.date)}</div>${p.note?'<div style="font-size:11px;color:var(--muted);">'+esc(p.note)+'</div>':''}</div>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <div style="font-size:14px;font-weight:800;color:var(--green);">-${fmt(p.amount)}</div>
-              <button style="background:none;border:none;color:var(--red);cursor:pointer;font-size:14px;" onclick="window.deleteTaxPayment(${prevYear},'${p.id}')">✕</button>
-            </div>
-          </div>`).join('')}
-        </div>`:''} 
-        <button class="btn-primary full" style="background:var(--green);margin-bottom:24px;" onclick="window.openAddTaxPaymentModal(${prevYear})"><span>＋ Registra Pagamento Tasse ${prevYear}</span></button>
-        
+        ${paymentsPrev.length?'<div class="card" style="margin-bottom:12px;"><div class="card-title" style="margin-bottom:8px;">Pagamenti ${prevYear}</div>'+
+          paymentsPrev.map(p=>'<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid rgba(0,0,0,0.04);">'+
+            '<div><div style="font-size:12px;font-weight:700;">'+fmtDate(p.date)+'</div>'+(p.note?'<div style="font-size:10px;color:var(--muted);">'+esc(p.note)+'</div>':'')+
+            '</div><div style="display:flex;align-items:center;gap:8px;"><div style="font-size:13px;font-weight:800;color:var(--green);">-'+fmt(p.amount)+'</div>'+
+            '<button style="background:none;border:none;color:var(--red);cursor:pointer;font-size:13px;" onclick="window.deleteTaxPayment('+prevYear+',\''+p.id+'\')">✕</button></div></div>'
+          ).join('')+'</div>':''}
+        <button class="btn-primary full" style="background:var(--green);margin-bottom:20px;" onclick="window.openAddTaxPaymentModal(${prevYear})"><span>＋ Registra Pagamento ${prevYear}</span></button>
         <div class="card">
-          <div class="card-title" style="margin-bottom:12px;">Storico Accantonamenti</div>
-          <div style="display:flex;justify-content:space-between;font-size:9px;font-weight:900;text-transform:uppercase;color:var(--muted);letter-spacing:.1em;margin-bottom:8px;">
-            <span>ANNO</span><span>ACCANTONAMENTO</span>
-          </div>
-          ${sortedYears.map(y=>{const acc=calcTaxAccrual(y);if(acc===0&&!state.taxPayments[y])return '';return `<div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid rgba(0,0,0,0.04);">
-            <div style="font-weight:800;font-family:'Sora';">${y}</div>
-            <div style="font-weight:800;color:#000;">${fmt(acc)}</div>
-          </div>`;}).join('')}
+          <div class="card-title" style="margin-bottom:10px;">Storico</div>
+          ${sortedYears.map(y=>{const acc=calcTaxAccrual(y);if(acc===0&&!state.taxPayments[y])return '';
+            return '<div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.04);"><div style="font-weight:800;font-family:\'Sora\';">'+y+'</div><div style="font-weight:800;">'+fmt(acc)+'</div></div>';
+          }).join('')}
         </div>
       </div>
       <div>
-        <div class="card" style="border-left:4px solid #8b5cf6;margin-bottom:14px;">
-          <div class="card-title">Accrual ${curYear} — da pagare nel ${curYear+1}</div>
-          <div style="font-family:'Sora';font-size:32px;font-weight:800;color:#8b5cf6;margin:6px 0;">${fmt(accrualCur)}</div>
-          <div style="font-size:11px;color:var(--muted);font-weight:700;">Metti da parte per pagare nel ${curYear+1}</div>
+        <div class="card" style="border-left:4px solid var(--purple);margin-bottom:12px;">
+          <div class="card-title">Accrual ${curYear}</div>
+          <div style="font-family:'Sora';font-size:28px;font-weight:800;color:var(--purple);">${fmt(accrualCur)}</div>
+          <div style="font-size:10px;color:var(--muted);font-weight:700;margin-top:4px;">Da pagare nel ${curYear+1}</div>
         </div>
-        <div class="card" style="margin-bottom:14px;">
+        <div class="card" style="margin-bottom:12px;">
           <div class="card-title" style="margin-bottom:8px;">Saldo conto tasse ${curYear}</div>
-          <input class="form-input" style="font-family:'Sora';font-size:20px;font-weight:800;" type="number" value="${state.taxAccount.balances[curYear]||0}" onchange="window.updateTaxBalance(${curYear},this.value)"/>
+          <input class="form-input" style="font-family:'Sora';font-size:18px;font-weight:800;" type="number" value="${state.taxAccount.balances[curYear]||0}" onchange="window.updateTaxBalance(${curYear},this.value)"/>
         </div>
         <div class="card">
           <div class="card-title" style="margin-bottom:8px;">Copertura ${curYear}</div>
-      ${(()=>{const bal=state.taxAccount.balances[curYear]||0,diff=round(bal-accrualCur);const cc=diff>=0?'var(--green)':'var(--red)';const ct=diff>=0?'Sei in pari o in surplus ✨':'Ti mancano '+fmt(Math.abs(diff))+' per la copertura.';return '<div style="font-family:Sora;font-size:24px;font-weight:800;color:'+cc+';">'+fmt(diff)+'</div><div style="font-size:11px;color:var(--muted);margin-top:4px;font-weight:600;">'+ct+'</div>';})(  )}
+          ${(()=>{const bal=state.taxAccount.balances[curYear]||0,diff=round(bal-accrualCur);const cc=diff>=0?'var(--green)':'var(--red)';const ct=diff>=0?'Sei in pari ✨':'Ti mancano '+fmt(Math.abs(diff));return '<div style="font-family:\'Sora\';font-size:22px;font-weight:800;color:'+cc+';">'+fmt(diff)+'</div><div style="font-size:11px;color:var(--muted);margin-top:4px;font-weight:600;">'+ct+'</div>';})(  )}
         </div>
       </div>
     </div>
   </div>`;
 };
 
-window.updateTaxBalance = (y,v) => {
-  state.taxAccount.balances[y]=parseFloat(v)||0;
-  saveState();
+window.updateTaxBalance=(y,v)=>{state.taxAccount.balances[y]=parseFloat(v)||0;saveState();};
+window.openAddTaxPaymentModal=y=>{
+  modalContainer.innerHTML='<div class="overlay" onclick="window.closeModal()"><div class="sheet" onclick="event.stopPropagation()"><div class="sheet-handle"></div><div class="sheet-title">Pagamento tasse '+y+'</div><div class="form-group"><label class="form-label">Importo</label><input class="form-input" id="tp-amt" type="number" placeholder="0.00"/></div><div class="form-group"><label class="form-label">Data</label><input class="form-input" id="tp-date" type="date" value="'+todayISO()+'"/></div><div class="form-group"><label class="form-label">Note</label><input class="form-input" id="tp-note" placeholder="es. Prima rata..."/></div><button class="btn-primary" onclick="window.saveTaxPayment('+y+')">Salva</button></div></div>';
 };
-window.openAddTaxPaymentModal = y => {
-  modalContainer.innerHTML=`
-    <div class="overlay" onclick="window.closeModal()">
-      <div class="sheet" onclick="event.stopPropagation()">
-        <div class="sheet-handle"></div>
-        <div class="sheet-title">Registra pagamento tasse ${y}</div>
-        <div class="form-group"><label class="form-label">Importo</label><input class="form-input" id="tp-amt" type="number" placeholder="0.00"/></div>
-        <div class="form-group"><label class="form-label">Data</label><input class="form-input" id="tp-date" type="date" value="${todayISO()}"/></div>
-        <div class="form-group"><label class="form-label">Note (opzionale)</label><input class="form-input" id="tp-note" placeholder="es. Prima rata acconto..."/></div>
-        <button class="btn-primary" onclick="window.saveTaxPayment(${y})">Salva Pagamento</button>
-      </div>
-    </div>`;
-};
-window.saveTaxPayment = y => {
+window.saveTaxPayment=y=>{
   const amt=parseFloat(document.getElementById('tp-amt').value)||0;
   const date=document.getElementById('tp-date').value;
   const note=document.getElementById('tp-note').value;
   if(!amt) return;
   if(!state.taxPayments[y]) state.taxPayments[y]=[];
   state.taxPayments[y].push({id:uid(),amount:amt,date,note});
-  saveState();
-  window.closeModal();
-  render('taxes');
+  saveState();window.closeModal();render('taxes');
 };
-window.deleteTaxPayment = (y,id) => {
-  state.taxPayments[y]=(state.taxPayments[y]||[]).filter(p=>p.id!==id);
-  saveState();
-  render('taxes');
-};
+window.deleteTaxPayment=(y,id)=>{state.taxPayments[y]=(state.taxPayments[y]||[]).filter(p=>p.id!==id);saveState();render('taxes');};
 
 // ═══════════════════════════════════════════════════
-// MODAL — INCOME (con flusso Inlab migliorato)
+// DEBT FUNCTIONS
 // ═══════════════════════════════════════════════════
-window.openIncomeModal = () => {
-  let step=1;
-  let data={area:'nico',payMode:'fatt',gross:0,collector:'nico',transferToOther:0,clientId:'',date:todayISO(),desc:''};
-
-  const draw = () => {
-    let content='';
-    if(step===1){
-      content=`
-        <div class="sheet-title">Tipo di Entrata</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
-          <button class="btn-analysis ${data.area==='nico'?'nico':''}" onclick="window.incomeNext({area:'nico'})">Nico</button>
-          <button class="btn-analysis ${data.area==='inlab'?'inlab':''}" onclick="window.incomeNext({area:'inlab'})">Inlab</button>
-        </div>`;
-    } else if(step===2 && data.area==='inlab'){
-      content=`
-        <div class="sheet-title">Chi ha incassato?</div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px;">
-          <button class="btn-analysis ${data.collector==='nico'?'nico':''}" onclick="window.incomeUpdate({collector:'nico'})">Nico</button>
-          <button class="btn-analysis" style="${data.collector==='ilaria'?'border:2px solid #6f7bff;':''}" onclick="window.incomeUpdate({collector:'ilaria'})">Ilaria</button>
-        </div>
-        <button class="btn-primary" onclick="window.incomeStep(3)">Avanti →</button>`;
-    } else if(step===2 && data.area==='nico'){
-      content=`
-        <div class="sheet-title">Dettagli</div>
-        <div class="form-group">
-          <label class="form-label">Cliente</label>
-          <select class="form-input" onchange="window.incomeUpdate({clientId:this.value})">
-            <option value="">Nessuno / Altro</option>
-            <option value="EXTRA">Extra</option>
-            ${state.clients.filter(c=>c.area==='nico').map(c=>`<option value="${c.id}" ${data.clientId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
-            <option value="NEW">＋ Nuovo</option>
-          </select>
-        </div>
-        ${data.clientId==='NEW'?'<div class="form-group"><label class="form-label">Nome Cliente</label><input class="form-input" id="income-client-name" value="'+( data.newClientName||'')+'" oninput="window.incomeUpdate(\'newClientName\',this.value)"/></div>':''}
-        <div class="form-group">
-          <label class="form-label">Modalità</label>
-          <div style="display:flex;gap:10px;">
-            <button class="chip ${data.payMode==='fatt'?'active':''}" onclick="window.incomeUpdate({payMode:'fatt'})">Fattura</button>
-            <button class="chip ${data.payMode==='cont'?'active':''}" onclick="window.incomeUpdate({payMode:'cont'})">Contanti</button>
-          </div>
-        </div>
-        <button class="btn-primary" onclick="window.incomeStep(3)">Avanti →</button>`;
-    } else if(step===3 && data.area==='inlab'){
-      // Inlab step 3: modalità pagamento
-      content=`
-        <div class="sheet-title">Modalità pagamento</div>
-        <div style="display:flex;gap:10px;margin-bottom:20px;">
-          <button class="chip ${data.payMode==='fatt'?'active':''}" onclick="window.incomeUpdate({payMode:'fatt'})">Fattura</button>
-          <button class="chip ${data.payMode==='cont'?'active':''}" onclick="window.incomeUpdate({payMode:'cont'})">Contanti</button>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Cliente Inlab</label>
-          <select class="form-input" onchange="window.incomeUpdate({clientId:this.value})">
-            <option value="">Nessuno / Altro</option>
-            <option value="EXTRA">Extra Inlab</option>
-            ${state.clients.filter(c=>c.area==='inlab').map(c=>`<option value="${c.id}" ${data.clientId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}
-            <option value="NEW">＋ Nuovo</option>
-          </select>
-        </div>
-        ${data.clientId==='NEW'?'<div class="form-group"><label class="form-label">Nome Cliente</label><input class="form-input" id="income-client-name" value="'+( data.newClientName||'')+'" oninput="window.incomeUpdate(\'newClientName\',this.value)"/></div>':''}
-        <button class="btn-primary" onclick="window.incomeStep(4)">Avanti →</button>`;
-    } else if(step===4 && data.area==='inlab'){
-      // Inlab step 4: importo + quanto hai dato/ricevuto dall'altro
-      const lordo = parseFloat(data.gross)||0;
-      const tax = data.payMode==='fatt' ? round(lordo*0.25) : 0;
-      const netto = round(lordo - tax);
-      const halfNetto = round(netto * 0.5);
-      // Se nico ha incassato → deve dare metà (netta) a ilaria (e viceversa)
-      const label = data.collector==='nico'
-        ? `Nico ha incassato → deve dare ${fmt(halfNetto)} a Ilaria`
-        : `Ilaria ha incassato → deve dare ${fmt(halfNetto)} a Nico`;
-      content=`
-        <div class="sheet-title">Importo Incassato</div>
-        <div class="form-group">
-          <input class="form-input" style="font-size:24px;text-align:center;" id="income-gross" type="number" inputmode="decimal" placeholder="0.00" value="${data.gross||''}" oninput="window.incomeUpdate({gross:parseFloat(this.value)||0},true);window.refreshInlabPreview()"/>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Data</label>
-          <input class="form-input" type="date" value="${data.date}" onchange="window.incomeUpdate({date:this.value},true)"/>
-        </div>
-        <div id="inlab-preview" class="preview-box visible" style="margin-bottom:16px; display:block !important;">
-          <div class="preview-row"><span>Lordo</span><span>${fmt(lordo)}</span></div>
-          ${data.payMode==='fatt'?'<div class="preview-row"><span>Tasse (25%)</span><span class="amber">'+fmt(tax)+'</span></div>':''}
-          <div class="preview-row"><span>Netto</span><span>${fmt(netto)}</span></div>
-          <div class="preview-row"><span>Quota Nico</span><span class="green">${fmt(halfNetto)}</span></div>
-          <div class="preview-row"><span>Quota Ilaria</span><span class="green">${fmt(halfNetto)}</span></div>
-          <div class="preview-row" style="border-top:2px dashed rgba(33,83,173,0.15);margin-top:4px;padding-top:4px;">
-            <span style="font-size:11px;color:var(--muted);">${label}</span>
-          </div>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Quanto hai già dato/ricevuto? (trasferimento manuale)</label>
-          <input class="form-input" type="number" inputmode="decimal" placeholder="0.00" value="${data.transferToOther||''}" oninput="window.incomeUpdate({transferToOther:parseFloat(this.value)||0},true)"/>
-        </div>
-        <button class="btn-primary" onclick="window.saveIncomeRecord()">Registra Entrata</button>`;
-    } else if(step===3 && data.area==='nico'){
-      // Nico step 3: importo
-      const tax = data.payMode==='fatt' ? round((parseFloat(data.gross)||0)*0.25) : 0;
-      const net = data.payMode==='fatt' ? round((parseFloat(data.gross)||0)*0.75) : (parseFloat(data.gross)||0);
-      content=`
-        <div class="sheet-title">Lordo Ricevuto</div>
-        <div class="form-group">
-          <input class="form-input" style="font-size:24px;text-align:center;" id="income-gross" type="number" inputmode="decimal" placeholder="0.00" value="${data.gross||''}" oninput="window.incomeUpdate({gross:parseFloat(this.value)||0},true);window.refreshNicoPreview()"/>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Data</label>
-          <input class="form-input" type="date" value="${data.date}" onchange="window.incomeUpdate({date:this.value},true)"/>
-        </div>
-        <div id="nico-preview" class="preview-box visible" style="display:block !important;">
-          <div class="preview-row"><span>Lordo</span><span>${fmt(parseFloat(data.gross)||0)}</span></div>
-          ${data.payMode==='fatt'?'<div class="preview-row"><span>Tasse (25%)</span><span class="amber">'+fmt(tax)+'</span></div>':''}
-          <div class="preview-row"><span>Netto Nico</span><span class="green">${fmt(net)}</span></div>
-        </div>
-        <button class="btn-primary" style="margin-top:12px;" onclick="window.saveIncomeRecord()">Registra Entrata</button>`;
-    }
-
-    modalContainer.innerHTML=`
-      <div class="overlay" onclick="window.closeModal()">
-        <div class="sheet" onclick="event.stopPropagation()">
-          <div class="sheet-handle"></div>
-          ${content}
-        </div>
-      </div>`;
-
-    if(step===3&&data.area==='nico'||step===4&&data.area==='inlab'){
-      setTimeout(()=>{
-        const el=document.getElementById('income-gross');
-        if(el) el.focus();
-      },50);
-    }
-  };
-
-  window.incomeNext   = obj => { Object.assign(data,obj); step++; draw(); };
-  window.incomeUpdate = (obj,skipDraw=false) => { Object.assign(data,obj); if(!skipDraw) draw(); };
-  window.incomeStep   = s => { step=s; draw(); };
-
-  window.refreshNicoPreview = () => {
-    const g=parseFloat(data.gross)||0;
-    const tax=data.payMode==='fatt'?round(g*0.25):0;
-    const net=data.payMode==='fatt'?round(g*0.75):g;
-    const p=document.getElementById('nico-preview');
-    if(p) p.innerHTML=`
-      <div class="preview-row"><span>Lordo</span><span>${fmt(g)}</span></div>
-      ${data.payMode==='fatt'?'<div class="preview-row"><span>Tasse (25%)</span><span class="amber">'+fmt(tax)+'</span></div>':''}
-      <div class="preview-row"><span>Netto Nico</span><span class="green">${fmt(net)}</span></div>`;
-  };
-
-  window.refreshInlabPreview = () => {
-    const g=parseFloat(data.gross)||0;
-    const tax=data.payMode==='fatt'?round(g*0.25):0;
-    const netto=round(g-tax);
-    const half=round(netto*0.5);
-    const label=data.collector==='nico'?`Nico ha incassato → deve dare ${fmt(half)} a Ilaria`:`Ilaria ha incassato → deve dare ${fmt(half)} a Nico`;
-    const p=document.getElementById('inlab-preview');
-    if(p) p.innerHTML=`
-      <div class="preview-row"><span>Lordo</span><span>${fmt(g)}</span></div>
-      ${data.payMode==='fatt'?'<div class="preview-row"><span>Tasse (25%)</span><span class="amber">'+fmt(tax)+'</span></div>':''}
-      <div class="preview-row"><span>Netto</span><span>${fmt(netto)}</span></div>
-      <div class="preview-row"><span>Quota Nico</span><span class="green">${fmt(half)}</span></div>
-      <div class="preview-row"><span>Quota Ilaria</span><span class="green">${fmt(half)}</span></div>
-      <div class="preview-row" style="border-top:2px dashed rgba(33,83,173,0.15);margin-top:4px;padding-top:4px;">
-        <span style="font-size:11px;color:var(--muted);">${label}</span>
-      </div>`;
-  };
-
-  window.saveIncomeRecord = () => {
-    const g=parseFloat(data.gross)||0;
-    if(!g) return;
-    let desc=data.desc;
-    if(data.clientId==='EXTRA') desc=(data.area==='nico'?'Extra Nico':'Extra Inlab');
-    else if(data.clientId==='NEW') desc=data.customName||'Cliente Manuale';
-    else if(data.clientId){ const c=state.clients.find(x=>x.id===data.clientId); if(c) desc=c.name; }
-
-    let nicoIncome=0, ilariaIncome=0, nicoTax=0;
-    if(data.area==='nico'){
-      nicoTax    = data.payMode==='fatt'?round(g*0.25):0;
-      nicoIncome = round(g-nicoTax);
-      ilariaIncome=0;
-    } else {
-      // Inlab
-      nicoTax      = data.payMode==='fatt'&&data.collector==='nico'?round(g*0.25):0;
-      const netto  = round(g-(data.payMode==='fatt'?round(g*0.25):0));
-      nicoIncome   = round(netto*0.5);
-      ilariaIncome = round(netto*0.5);
-    }
-
-    state.transactions.push({
-      id:uid(), kind:'income', area:data.area, desc:desc||(data.area==='nico'?'Nico':'Inlab'),
-      gross:g, payMode:data.payMode, collector:data.collector,
-      transferToOther:data.transferToOther||0, clientId:data.clientId,
-      date:data.date, nicoIncome, ilariaIncome, nicoTax,
-      createdAt:new Date().toISOString()
-    });
-    saveState();
-    window.closeModal();
-    render(lastViewId);
-  };
-  draw();
+window.openAddDebtModal = () => {
+  modalContainer.innerHTML='<div class="overlay" onclick="window.closeModal()"><div class="sheet" onclick="event.stopPropagation()"><div class="sheet-handle"></div><div class="sheet-title">Aggiungi Debito</div>'+
+    '<div class="form-group"><label class="form-label">Nome (chi ti deve)</label><input class="form-input" id="debt-name" placeholder="es. Marco"/></div>'+
+    '<div class="form-group"><label class="form-label">Importo</label><input class="form-input" id="debt-amt" type="number" placeholder="0.00"/></div>'+
+    '<div class="form-group"><label class="form-label">Data</label><input class="form-input" id="debt-date" type="date" value="'+todayISO()+'"/></div>'+
+    '<div class="form-group"><label class="form-label">Nota (opzionale)</label><input class="form-input" id="debt-note" placeholder="es. Prestito cena..."/></div>'+
+    '<button class="btn-primary" onclick="window.saveDebt()">Aggiungi</button></div></div>';
+};
+window.saveDebt = () => {
+  const name=(document.getElementById('debt-name').value||'').trim();
+  const amount=parseFloat(document.getElementById('debt-amt').value)||0;
+  const date=document.getElementById('debt-date').value;
+  const note=document.getElementById('debt-note').value;
+  if(!name||!amount) return;
+  if(!state.debts) state.debts=[];
+  state.debts.push({id:uid(),name,amount,date,note,settled:false,createdAt:new Date().toISOString()});
+  saveState();window.closeModal();render(lastViewId);
+};
+window.settleDebt = id => {
+  if(!state.debts) return;
+  const d=state.debts.find(x=>x.id===id);
+  if(d){d.settled=true;d.settledAt=new Date().toISOString();}
+  saveState();render(lastViewId);
+};
+window.deleteDebt = id => {
+  if(!state.debts) return;
+  state.debts=state.debts.filter(x=>x.id!==id);
+  saveState();render(lastViewId);
 };
 
 // ═══════════════════════════════════════════════════
-// MODAL — EXPENSE (con categoria)
+// MARK CLIENT PAID / SETTLED
 // ═══════════════════════════════════════════════════
-window.openExpenseModal = () => {
-  window._exp = { area:'nico', paidBy:'nico', category: state.expenseCategories[0]||'Necessità', desc:'', amt:'', date: todayISO() };
-
-  const catOpts = () => state.expenseCategories.map(c=>`<option value="${esc(c)}" ${window._exp.category===c?'selected':''}>${esc(c)}</option>`).join('');
-
-  const drawExp = () => {
-    const e = window._exp;
-    modalContainer.innerHTML=`
-      <div class="overlay" onclick="window.closeModal()">
-        <div class="sheet" onclick="event.stopPropagation()">
-          <div class="sheet-handle"></div>
-          <div class="sheet-title">Nuova Uscita</div>
-          <div class="form-group">
-            <label class="form-label">Descrizione</label>
-            <input class="form-input" id="exp-desc" placeholder="es. Amazon, Affitto..." value="${esc(e.desc)}" oninput="window._exp.desc=this.value"/>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Importo</label>
-            <input class="form-input" id="exp-amt" type="number" inputmode="decimal" placeholder="0.00" value="${e.amt}" oninput="window._exp.amt=this.value; window._refreshExpPreview()"/>
-          </div>
-          <div id="exp-preview" class="preview-box" style="display:none;"></div>
-          <div class="form-group">
-            <label class="form-label">Area</label>
-            <div style="display:flex;gap:10px;">
-              <button class="chip ${e.area==='nico'?'active':''}" onclick="window._exp.area='nico';window._drawExp();window._refreshExpPreview()">Personale (Nico)</button>
-              <button class="chip ${e.area==='inlab'?'active':''}" onclick="window._exp.area='inlab';window._drawExp();window._refreshExpPreview()">Inlab (50/50)</button>
-            </div>
-          </div>
-          ${e.area==='inlab'?`
-          <div class="form-group">
-            <label class="form-label">Chi ha pagato?</label>
-            <div style="display:flex;gap:10px;">
-              <button class="chip ${e.paidBy==='nico'?'active':''}" onclick="window._exp.paidBy='nico';window._drawExp();window._refreshExpPreview()">Nico</button>
-              <button class="chip ${e.paidBy==='ilaria'?'active':''}" onclick="window._exp.paidBy='ilaria';window._drawExp();window._refreshExpPreview()">Ilaria</button>
-            </div>
-            <div style="font-size:11px;color:var(--muted);margin-top:6px;font-weight:700;">Chi ha pagato anticiperà la metà dell'altro socio</div>
-          </div>`:''}
-          <div class="form-group">
-            <label class="form-label">Categoria</label>
-            <div style="display:flex;gap:8px;align-items:center;">
-              <select class="form-input" id="exp-cat" onchange="window._exp.category=this.value">${catOpts()}</select>
-              <button class="chip" onclick="window.addExpenseCategory()" style="flex-shrink:0;white-space:nowrap;">＋</button>
-            </div>
-          </div>
-          <div class="form-group">
-            <label class="form-label">Data</label>
-            <input class="form-input" id="exp-date" type="date" value="${e.date}" onchange="window._exp.date=this.value"/>
-          </div>
-          <button class="btn-primary" onclick="window.saveExpense()">Salva Uscita</button>
-        </div>
-      </div>`;
-  };
-
-  window._drawExp = drawExp;
-
-  window._refreshExpPreview = () => {
-    const e = window._exp;
-    const amt = parseFloat(document.getElementById('exp-amt')?.value || e.amt) || 0;
-    const p = document.getElementById('exp-preview');
-    if(!p) return;
-    if(!amt) { p.style.display='none'; p.classList.remove('visible'); return; }
-    p.style.display='block';
-    p.classList.add('visible');
-    if(e.area==='nico') {
-      p.innerHTML = `<div class="preview-row"><span>Spesa Nico</span><span class="red">${fmt(amt)}</span></div>`;
-    } else {
-      const half = round(amt*0.5);
-      p.innerHTML = `
-        <div class="preview-row"><span>Spesa Inlab</span><span class="red">${fmt(amt)}</span></div>
-        <div class="preview-row"><span>Quota Nico</span><span class="red">${fmt(half)}</span></div>
-        <div class="preview-row"><span>Quota Ilaria</span><span class="red">${fmt(half)}</span></div>
-        <div class="preview-row" style="border-top:1px dashed rgba(0,0,0,0.1); margin-top:8px; padding-top:8px;">
-          <span style="font-size:11px; color:var(--muted);">${e.paidBy==='nico'?'Nico ha pagato → Ilaria deve ' + fmt(half) : 'Ilaria ha pagato → Nico deve ' + fmt(half)}</span>
-        </div>
-      `;
-    }
-  };
-
-  window.addExpenseCategory = () => {
-    const name=prompt('Nome nuova categoria:');
-    if(name&&name.trim()&&!state.expenseCategories.includes(name.trim())){
-      state.expenseCategories.push(name.trim());
-      window._exp.category=name.trim();
-      saveState();
-    }
-    drawExp();
-  };
-
-  window.saveExpense = () => {
-    const e = window._exp;
-    const amt = parseFloat(document.getElementById('exp-amt')?.value||e.amt)||0;
-    const desc = (document.getElementById('exp-desc')?.value||e.desc).trim();
-    const date = document.getElementById('exp-date')?.value||e.date;
-    const cat  = document.getElementById('exp-cat')?.value||e.category;
-    if(!amt) return;
-    state.transactions.push({
-      id:uid(), kind:'expense', area:e.area,
-      paidBy: e.area==='inlab' ? e.paidBy : 'nico',
-      desc, gross:amt, category:cat, date,
-      createdAt:new Date().toISOString()
-    });
-    saveState();
-    window.closeModal();
-    render(lastViewId);
-  };
-
-  drawExp();
-  setTimeout(()=>window._refreshExpPreview(), 0);
+window.markClientPaid = (clientId, month, year, amount) => {
+  const c = state.clients.find(x=>x.id===clientId);
+  if(!c) return;
+  const g = parseFloat(amount)||0;
+  const nicoTax = c.payMode==='fatt' ? round(g*0.25) : 0;
+  const nicoIncome = c.area==='nico' ? round(g-nicoTax) : round((g-nicoTax)*0.5);
+  const date = year+'-'+String(month).padStart(2,'0')+'-'+String(c.recurringDay||1).padStart(2,'0');
+  state.transactions.push({
+    id:uid(), kind:'income', area:c.area, desc:c.name,
+    gross:g, payMode:c.payMode, collector:'nico',
+    clientId, date, nicoIncome, ilariaIncome:c.area==='inlab'?round((g-nicoTax)*0.5):0,
+    nicoTax, createdAt:new Date().toISOString()
+  });
+  saveState();render(lastViewId);
 };
 
-
-window.openTransferModal = () => {
-  modalContainer.innerHTML=`
-    <div class="overlay" onclick="window.closeModal()">
-      <div class="sheet" onclick="event.stopPropagation()">
-        <div class="sheet-handle"></div>
-        <div class="sheet-title">Registra Trasferimento</div>
-        <div style="font-size:13px;color:var(--muted);margin-bottom:16px;">Registra quando Nico passa soldi a Ilaria o viceversa, per pareggiare i conti Inlab.</div>
-        <div class="form-group">
-          <label class="form-label">Da</label>
-          <div style="display:flex;gap:10px;" id="tr-from-btns">
-            <button class="chip active" id="tr-from-nico" onclick="window._trSetFrom('nico')">Nico</button>
-            <button class="chip" id="tr-from-ilaria" onclick="window._trSetFrom('ilaria')">Ilaria</button>
-          </div>
-        </div>
-        <div class="form-group">
-          <label class="form-label">A</label>
-          <div id="tr-to-label" style="font-size:14px;font-weight:800;color:var(--text);padding:10px 0;">Ilaria</div>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Importo</label>
-          <input class="form-input" id="tr-amt" type="number" inputmode="decimal" placeholder="0.00" style="font-size:22px;text-align:center;"/>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Data</label>
-          <input class="form-input" id="tr-date" type="date" value="${todayISO()}"/>
-        </div>
-        <div class="form-group">
-          <label class="form-label">Note (opzionale)</label>
-          <input class="form-input" id="tr-note" placeholder="es. Bonifico aprile"/>
-        </div>
-        <button class="btn-primary" style="background:var(--purple);" onclick="window.saveTransfer()">Registra Trasferimento</button>
-      </div>
-    </div>`;
-  window._trFrom = 'nico';
-  window._trSetFrom = (who) => {
-    window._trFrom = who;
-    document.getElementById('tr-from-nico').className   = 'chip' + (who==='nico'?' active':'');
-    document.getElementById('tr-from-ilaria').className = 'chip' + (who==='ilaria'?' active':'');
-    document.getElementById('tr-to-label').textContent  = who==='nico' ? 'Ilaria' : 'Nico';
-  };
-  window.saveTransfer = () => {
-    const amt  = parseFloat(document.getElementById('tr-amt')?.value)||0;
-    const date = document.getElementById('tr-date')?.value||todayISO();
-    const note = document.getElementById('tr-note')?.value||'';
-    const from = window._trFrom;
-    const to   = from==='nico' ? 'ilaria' : 'nico';
-    if(!amt) return;
-    state.transactions.push({
-      id:uid(), kind:'transfer', area:'inlab',
-      from, to, gross:amt,
-      desc: note || `Trasferimento ${from} → ${to}`,
-      date, createdAt:new Date().toISOString()
-    });
-    saveState();
-    window.closeModal();
-    render(lastViewId);
-  };
-  setTimeout(()=>document.getElementById('tr-amt')?.focus(), 100);
+window.markClientSettled = (clientId, month, year) => {
+  // Mark as settled by adding a 0-amount "settled" transaction
+  const date = year+'-'+String(month).padStart(2,'0')+'-01';
+  const c = state.clients.find(x=>x.id===clientId);
+  if(!c) return;
+  const expected = parseFloat(c.monthlyAmount||c.expectedAmount)||0;
+  state.transactions.push({
+    id:uid(), kind:'income', area:c.area, desc:c.name+' (saldato)',
+    gross:expected, payMode:c.payMode, collector:'nico',
+    clientId, date, nicoIncome:0, ilariaIncome:0, nicoTax:0,
+    settled:true, createdAt:new Date().toISOString()
+  });
+  saveState();render(lastViewId);
 };
 
-window.closeModal = () => { modalContainer.innerHTML=''; window._expDesc=''; window._expAmt=''; };
+// ═══════════════════════════════════════════════════
+// GLOBAL HELPERS
+// ═══════════════════════════════════════════════════
+window.updateFilter=(key,val)=>{
+  if(key==='compareYear') state.filters[key]=val?parseInt(val):null;
+  else state.filters[key]=parseInt(val);
+  saveState();render(lastViewId);
+};
+window.updatePeriodType=type=>{
+  state.filters.period=type;
+  if(type==='annual') state.filters.month=13;
+  saveState();render(lastViewId);
+};
+window.render=render;
 
 // ═══════════════════════════════════════════════════
-// MODAL — CLIENT DETAIL
+// BOOT
 // ═══════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', async () => {
+  app.innerHTML='<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;gap:14px;background:#0a0a0a;"><div style="font-size:32px;">💸</div><div style="font-size:13px;color:#555;font-weight:600;font-family:sans-serif;">Caricamento...</div></div>';
+  state=await initDB(state,(remoteState)=>{state=remoteState;runPacSync();render(lastViewId);});
+  if(!state.debts) state.debts=[];
+  runPacSync();render('home');
+});
 window.openClientDetail = id => {
   // modalità: 'view' | 'edit'
   let mode = 'view';
@@ -2212,40 +2080,3 @@ window.disablePac = id => {
 // ═══════════════════════════════════════════════════
 // GLOBAL HELPERS
 // ═══════════════════════════════════════════════════
-window.updateFilter = (key,val) => {
-  if(key==='compareYear') state.filters[key] = val ? parseInt(val) : null;
-  else state.filters[key]=parseInt(val);
-  saveState();render(lastViewId);
-};
-window.updatePeriodType = type => {
-  state.filters.period=type;
-  if(type==='annual') state.filters.month=13;
-  saveState();render(lastViewId);
-};
-window.render=render;
-
-// ═══════════════════════════════════════════════════
-// BOOT
-// ═══════════════════════════════════════════════════
-window.addEventListener('DOMContentLoaded', async () => {
-  // Schermata di caricamento
-  app.innerHTML = `
-    <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;
-                height:100vh;gap:16px;background:#0a0a0a;">
-      <div style="font-size:36px;">💸</div>
-      <div style="font-size:14px;color:#555;font-weight:600;font-family:sans-serif;letter-spacing:.5px;">
-        Caricamento dati...
-      </div>
-    </div>`;
-
-  // Carica state da Firestore (con fallback localStorage)
-  state = await initDB(state, (remoteState) => {
-    // Callback: aggiornamento da altro dispositivo
-    state = remoteState;
-    runPacSync();
-    render(lastViewId);
-  });
-
-  runPacSync();
-  render('home');
-});

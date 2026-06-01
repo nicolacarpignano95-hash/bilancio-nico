@@ -15,7 +15,8 @@ let state = {
     year: new Date().getFullYear(),
     period: 'monthly',
     rangeFrom: 1,
-    rangeTo: new Date().getMonth() + 1
+    rangeTo: new Date().getMonth() + 1,
+    compareYear: null,
   },
   txFilters: { kind: 'all', area: 'all', search: '' },
   settings: { savingsGoal: 10000 },
@@ -74,6 +75,170 @@ const getPeriodLabel = () => {
 };
 
 const saveState = () => dbSave(state);
+
+// ═══════════════════════════════════════════════════
+// CONFRONTO ANNUALE — helper functions
+// ═══════════════════════════════════════════════════
+const getAvailableYears = () => {
+  const years = new Set();
+  state.transactions.forEach(t => years.add(new Date(t.date).getFullYear()));
+  Object.keys(state.taxPayments||{}).forEach(y => years.add(parseInt(y)));
+  return Array.from(years).sort((a,b)=>b-a);
+};
+
+const getCompareYear = () => {
+  const cy = state.filters.compareYear;
+  const y  = state.filters.year;
+  if(cy && cy !== y) return cy;
+  // Default: anno precedente
+  const avail = getAvailableYears().filter(yr => yr < y);
+  return avail.length ? avail[0] : null;
+};
+
+const calcYearStats = (year) => {
+  const inc  = Array.from({length:12},(_,i)=>calcNicoIncome(i+1,year));
+  const exp  = Array.from({length:12},(_,i)=>calcNicoExpenses(i+1,year));
+  const totalInc = round(inc.reduce((s,v)=>s+v,0));
+  const totalExp = round(exp.reduce((s,v)=>s+v,0));
+  return { inc, exp, totalInc, totalExp, net: round(totalInc-totalExp) };
+};
+
+const pctDiff = (curr, prev) => {
+  if(!prev || prev===0) return null;
+  return round(((curr-prev)/Math.abs(prev))*100);
+};
+
+const renderDelta = (curr, prev, invert=false) => {
+  if(prev===null || prev===undefined) return '';
+  const d = pctDiff(curr, prev);
+  if(d===null) return '';
+  const positive = invert ? d<0 : d>=0;
+  const color = positive ? 'var(--green)' : 'var(--red)';
+  const arrow = d>=0 ? '↑' : '↓';
+  return `<span style="font-size:11px;font-weight:800;color:${color};margin-left:6px;">${arrow} ${Math.abs(d).toFixed(1)}%</span>`;
+};
+
+const renderCompareSelector = (label='') => {
+  const years = getAvailableYears();
+  const cy = state.filters.compareYear;
+  const y  = state.filters.year;
+  const options = years.filter(yr=>yr!==y).map(yr=>
+    `<option value="${yr}" ${cy===yr?'selected':''}>${yr}</option>`
+  ).join('');
+  return `<div style="display:flex;align-items:center;gap:6px;margin-left:auto;">
+    <span style="font-size:10px;font-weight:900;text-transform:uppercase;color:var(--muted);">Confronta con</span>
+    <select class="filter-select" onchange="window.updateFilter('compareYear',parseInt(this.value))">
+      <option value="">—</option>
+      ${options}
+    </select>
+  </div>`;
+};
+
+// Render confronto mese vs stesso mese anno di confronto
+const renderMonthComparison = (month, year) => {
+  const cy = getCompareYear();
+  if(!cy) return '';
+  const inc1=calcNicoIncome(month,year), exp1=calcNicoExpenses(month,year), net1=round(inc1-exp1);
+  const inc2=calcNicoIncome(month,cy),   exp2=calcNicoExpenses(month,cy),   net2=round(inc2-exp2);
+  const dInc=pctDiff(inc1,inc2), dExp=pctDiff(exp1,exp2), dNet=pctDiff(net1,net2);
+  const cols = [
+    {label:'Entrate', curr:inc1, prev:inc2, d:dInc, color:'var(--green)', invert:false},
+    {label:'Uscite',  curr:exp1, prev:exp2, d:dExp, color:'var(--red)',   invert:true},
+    {label:'Netto',   curr:net1, prev:net2, d:dNet, color:net1>=0?'#000':'var(--red)', invert:false},
+  ];
+  return `<div class="card" style="margin-top:16px;padding:16px 20px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <div class="card-title" style="margin-bottom:0;">Confronto vs ${MS_ABBR[month-1]} ${cy}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+      ${cols.map(c=>{
+        const pos = c.invert ? (c.d!==null&&c.d<0) : (c.d!==null&&c.d>=0);
+        const col = c.d===null?'var(--muted)':pos?'var(--green)':'var(--red)';
+        const arrow = c.d===null?'':c.d>=0?'↑':'↓';
+        return `<div style="background:var(--sf);border-radius:10px;padding:12px;">
+          <div style="font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">${c.label}</div>
+          <div style="font-family:'Sora';font-size:16px;font-weight:800;">${fmt(c.curr)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;">${fmt(c.prev)} in ${cy}</div>
+          ${c.d!==null?`<div style="font-size:11px;font-weight:800;color:${col};margin-top:3px;">${c.d>=0?'↑':'↓'} ${Math.abs(c.d).toFixed(1)}%</div>`:''}
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+};
+
+// Render confronto annuale completo
+const renderAnnualComparison = (year) => {
+  const cy = getCompareYear();
+  if(!cy) return `<div style="padding:16px;text-align:center;color:var(--muted);font-size:13px;">Seleziona un anno da confrontare nella barra in alto</div>`;
+  const s1 = calcYearStats(year);
+  const s2 = calcYearStats(cy);
+  const rows = [
+    {label:'Entrate totali',  v1:s1.totalInc, v2:s2.totalInc, color:'var(--green)', invert:false},
+    {label:'Uscite totali',   v1:s1.totalExp, v2:s2.totalExp, color:'var(--red)',   invert:true},
+    {label:'Risparmio netto', v1:s1.net,      v2:s2.net,      color:s1.net>=0?'#000':'var(--red)', invert:false},
+  ];
+  return `<div class="card" style="margin-top:16px;">
+    <div class="card-title" style="margin-bottom:16px;">${year} vs ${cy} — Riepilogo annuale</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px;">
+      ${rows.map(r=>{
+        const d=pctDiff(r.v1,r.v2);
+        const pos=r.invert?(d!==null&&d<0):(d!==null&&d>=0);
+        const col=d===null?'var(--muted)':pos?'var(--green)':'var(--red)';
+        return `<div style="border:1.5px solid var(--border);border-radius:10px;padding:14px;">
+          <div style="font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">${r.label}</div>
+          <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${r.color};">${fmt(r.v1)}</div>
+          <div style="font-size:11px;color:var(--muted);margin-top:2px;">${fmt(r.v2)} nel ${cy}</div>
+          ${d!==null?`<div style="font-size:11px;font-weight:800;color:${col};margin-top:3px;">${d>=0?'↑':'↓'} ${Math.abs(d).toFixed(1)}%</div>`:''}
+        </div>`;
+      }).join('')}
+    </div>
+    <div class="card-title" style="margin-bottom:10px;">Mese per mese</div>
+    <div style="display:grid;grid-template-columns:80px repeat(3,1fr);gap:0;font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);padding-bottom:6px;border-bottom:1.5px solid #000;">
+      <span>Mese</span><span>Entrate</span><span>Uscite</span><span>Netto</span>
+    </div>
+    ${Array.from({length:12},(_,i)=>{
+      const inc1=s1.inc[i],exp1=s1.exp[i],net1=round(inc1-exp1);
+      const inc2=s2.inc[i],exp2=s2.exp[i],net2=round(inc2-exp2);
+      const dNet=pctDiff(net1,net2);
+      const col=dNet===null?'var(--muted)':dNet>=0?'var(--green)':'var(--red)';
+      if(inc1===0&&inc2===0) return '';
+      return `<div style="display:grid;grid-template-columns:80px repeat(3,1fr);gap:0;padding:8px 0;border-bottom:1px solid rgba(0,0,0,0.05);font-size:12px;">
+        <span style="font-weight:800;color:var(--muted);">${MS_ABBR[i]}</span>
+        <span>${fmt(inc1)}<br><span style="font-size:10px;color:var(--muted);">${fmt(inc2)}</span></span>
+        <span>${fmt(exp1)}<br><span style="font-size:10px;color:var(--muted);">${fmt(exp2)}</span></span>
+        <span style="font-weight:800;">${fmt(net1)}<br>${dNet!==null?`<span style="font-size:10px;color:${col};">${dNet>=0?'↑':'↓'} ${Math.abs(dNet).toFixed(1)}%</span>`:''}</span>
+      </div>`;
+    }).join('')}
+  </div>`;
+};
+
+// Confronto asset singolo
+const renderAssetComparison = (inv) => {
+  const cy = getCompareYear();
+  if(!cy) return '';
+  const curYear = state.filters.year;
+  // v1 del confronto = v0 (valore storico iniziale) se l'anno confrontato è precedente
+  const v1cy = inv.v0 || inv.v1;
+  const gainCur = round(inv.balance - inv.v1);
+  const pctCur = inv.v1>0 ? round((gainCur/inv.v1)*100) : 0;
+  return `<div class="card" style="margin-top:14px;">
+    <div class="card-title" style="margin-bottom:12px;">Confronto ${curYear} vs ${cy}</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div style="background:var(--sf);border-radius:10px;padding:12px;">
+        <div style="font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">${curYear} — Valore attuale</div>
+        <div style="font-family:'Sora';font-size:18px;font-weight:800;">${fmt(inv.balance)}</div>
+        <div style="font-size:11px;margin-top:3px;color:${gainCur>=0?'var(--green)':'var(--red)'};">${gainCur>=0?'+':''}${fmt(gainCur)} (${pct(pctCur)})</div>
+      </div>
+      <div style="background:var(--sf);border-radius:10px;padding:12px;">
+        <div style="font-size:9px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:4px;">${cy} — Inizio anno</div>
+        <div style="font-family:'Sora';font-size:18px;font-weight:800;">${fmt(v1cy)}</div>
+        <div style="font-size:11px;margin-top:3px;color:var(--muted);">Valore di partenza</div>
+      </div>
+    </div>
+  </div>`;
+};
+
+
 
 // ═══════════════════════════════════════════════════
 // ASSET HELPERS
@@ -420,7 +585,7 @@ const renderPeriodSelectors = (pageLabel='') => {
       </div>
       ${period==='monthly'?monthSel:period==='range'?rangeSel:''}
       ${yearSel}
-      <div style="margin-left:auto;font-size:11px;font-weight:800;color:var(--muted);">${getPeriodLabel()}</div>
+      ${renderCompareSelector()}
     </div>`;
   }
   // Return empty string — no inline period block anymore
@@ -430,6 +595,17 @@ const renderPeriodSelectors = (pageLabel='') => {
 // ═══════════════════════════════════════════════════
 // HOME VIEW
 // ═══════════════════════════════════════════════════
+const renderOutstandingPayments = () => {
+  const allMissing=state.clients.filter(c=>c.active&&calcClientStatus(c.id).missing>0);
+  if(!allMissing.length) return `<div class="empty" style="padding:20px;">Nessun insoluto ✨</div>`;
+  return allMissing.slice(0,6).map(c=>`
+    <div class="tx-item" onclick="window.openClientDetail('${c.id}')">
+      <div class="tx-dot" style="background:var(--amber)"></div>
+      <div class="tx-info"><div class="tx-label">${esc(c.name)}</div></div>
+      <div class="tx-amount neg">${fmt(calcClientStatus(c.id).missing)}</div>
+    </div>`).join('');
+};
+
 const renderOutstandingPayments = () => {
   const allMissing=state.clients.filter(c=>c.active&&calcClientStatus(c.id).missing>0.01);
   if(!allMissing.length) return '<div style="text-align:center;padding:24px 0;font-size:13px;font-weight:700;color:var(--muted);">✨ Nessun insoluto</div>';
@@ -479,167 +655,100 @@ const renderHomeView = (slot) => {
   const inc=calcNicoIncome(month,year), exp=calcNicoExpenses(month,year);
   const tot=getWealthTotal();
   const stipendio=calcStipendioStimato();
+  const inlabExp=calcInlabExpenses(month,year);
   const bal=calcInlabBalance(month,year);
-  const liq=getLiquidTotal();
-  const inv=getInvestTotal();
-
-  // Ultimi 5 movimenti ordinati per data desc, con amount > 0
-  const recentTx = [...state.transactions]
-    .filter(tx => tx.amount > 0)
-    .sort((a,b)=>(b.date||'').localeCompare(a.date||''))
-    .slice(0,5);
-
-  const catIcon = cat => {
-    const map = {
-      'Necessità':'🏠','Extra':'🛍️','Lavoro':'💼','Viaggi':'✈️',
-      'Cibo':'🍽️','Salute':'💊','Casa':'🏡','Abbonamenti':'📱',
-      'Stipendio':'💰','Freelance':'🧑‍💻','Inlab':'🏢','Affitto':'🏠',
-      'default':'💳'
-    };
-    return map[cat] || map['default'];
-  };
-
-  const recentHtml = recentTx.length ? recentTx.map(tx=>{
-    const isInc = tx.kind==='income';
-    const icon = catIcon(tx.category);
-    const area = tx.area==='inlab' ? `<span style="font-size:9px;font-weight:700;background:#f0f0f0;color:#888;border-radius:3px;padding:1px 4px;margin-left:5px;letter-spacing:.04em;">INLAB</span>` : '';
-    const dateStr = tx.date ? new Date(tx.date).toLocaleDateString('it-IT',{day:'2-digit',month:'short'}) : '—';
-    return `<div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(0,0,0,0.05);">
-      <div style="width:36px;height:36px;border-radius:10px;background:${isInc?'#f0faf5':'#fef2f2'};display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;">${icon}</div>
-      <div style="flex:1;min-width:0;">
-        <div style="font-size:13px;font-weight:700;color:#111;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(tx.label||tx.category||'—')}${area}</div>
-        <div style="font-size:11px;color:#9ca3af;margin-top:1px;">${dateStr}${tx.category?' · '+esc(tx.category):''}</div>
-      </div>
-      <div style="font-family:'Sora';font-size:14px;font-weight:800;color:${isInc?'#059669':'#dc2626'};flex-shrink:0;">${isInc?'+':'−'}${fmt(Math.abs(tx.amount||0))}</div>
-    </div>`;
-  }).join('') : `<div style="text-align:center;padding:24px 0;font-size:12px;font-weight:700;color:#9ca3af;">Nessun movimento</div>`;
-
   renderPeriodSelectors('Dashboard');
-  slot.innerHTML=`<div class="page fade-up" style="padding:24px 28px;">
-
-    <!-- Header -->
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;">
+  slot.innerHTML=`<div class="page fade-up">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px;">
       <div>
-        <div style="font-family:'Sora';font-size:24px;font-weight:800;letter-spacing:-0.04em;color:#000;">Panoramica</div>
-        <div style="font-size:11px;font-weight:700;color:#9ca3af;text-transform:uppercase;letter-spacing:.12em;margin-top:3px;">${getPeriodLabel()}</div>
+        <div style="font-family:'Sora';font-size:20px;font-weight:800;letter-spacing:-0.02em;color:#000;">Panoramica</div>
+        <div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.1em;">${getPeriodLabel()}</div>
       </div>
       <div style="display:flex;gap:8px;">
-        <button class="btn-primary" onclick="window.openIncomeModal()" style="gap:6px;padding:10px 18px;">＋ Entrata</button>
-        <button class="btn-ghost" onclick="window.openExpenseModal()" style="padding:10px 18px;">－ Uscita</button>
+        <button class="btn-primary" onclick="window.openIncomeModal()">＋ Entrata</button>
+        <button class="btn-ghost" onclick="window.openExpenseModal()">－ Uscita</button>
       </div>
     </div>
 
-    <!-- Hero KPI row -->
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px;">
-
-      <!-- Netto Nico — hero card -->
-      <div onclick="window.render('nico')" style="cursor:pointer;background:${net>=0?'#f0fdf4':'#fff1f2'};border:1.5px solid ${net>=0?'#bbf7d0':'#fecdd3'};border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
-        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:${net>=0?'#16a34a':'#dc2626'};margin-bottom:10px;">Netto Nico</div>
-        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:${net>=0?'#15803d':'#b91c1c'};line-height:1;">${fmt(net)}</div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid ${net>=0?'#bbf7d0':'#fecdd3'};display:flex;justify-content:space-between;align-items:center;">
-          <div style="font-size:11px;font-weight:700;color:${net>=0?'#16a34a':'#dc2626'};">${net>=0?'↑':'↓'} ${fmt(inc)} entr.</div>
-          <div style="font-size:10px;color:#9ca3af;font-weight:700;">↗ Dettaglio</div>
-        </div>
+    <!-- 4 KPI cards -->
+    <div class="grid-4" style="margin-bottom:20px;">
+      <div class="kpi-card" style="border-left:3px solid #000;cursor:pointer;" onclick="window.render('nico')">
+        <div class="kpi-label">Netto Nico</div>
+        <div class="kpi-val" style="color:${net>=0?'#000':'var(--red)'}">${fmt(net)}</div>
+        <div class="kpi-delta" style="color:${net>=0?'var(--green)':'var(--red)'}">${net>=0?'↑':'↓'} ${fmt(inc)} entrate</div>
       </div>
-
-      <!-- Inlab -->
-      <div onclick="window.render('inlab')" style="cursor:pointer;background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
-        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#6b7280;margin-bottom:10px;">Giro Inlab</div>
-        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:#111;line-height:1;">${fmt(inlab)}</div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,0.06);display:flex;justify-content:space-between;align-items:center;">
-          <div style="font-size:11px;font-weight:700;color:#6b7280;">Quota: ${fmt(bal.nicoShare)}</div>
-          <div style="font-size:10px;color:#9ca3af;font-weight:700;">↗ Dettaglio</div>
-        </div>
+      <div class="kpi-card" style="border-left:3px solid var(--muted);cursor:pointer;" onclick="window.render('inlab')">
+        <div class="kpi-label">Giro Inlab</div>
+        <div class="kpi-val">${fmt(inlab)}</div>
+        <div class="kpi-delta">Quota Nico: ${fmt(bal.nicoShare)}</div>
       </div>
-
-      <!-- Patrimonio -->
-      <div onclick="window.render('assets')" style="cursor:pointer;background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
-        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#059669;margin-bottom:10px;">Patrimonio</div>
-        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:#111;line-height:1;">${fmt(tot)}</div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,0,0,0.06);display:flex;justify-content:space-between;align-items:center;">
-          <div style="font-size:11px;font-weight:700;color:#059669;">${fmt(liq)} liq</div>
-          <div style="font-size:11px;font-weight:700;color:#374151;">${fmt(inv)} inv</div>
-        </div>
+      <div class="kpi-card" style="border-left:3px solid var(--green);cursor:pointer;" onclick="window.render('assets')">
+        <div class="kpi-label">Patrimonio</div>
+        <div class="kpi-val">${fmt(tot)}</div>
+        <div class="kpi-delta">Liquidità + Investimenti</div>
       </div>
-
-      <!-- Stipendio stimato -->
-      <div onclick="window.render('taxes')" style="cursor:pointer;background:#fffbeb;border:1.5px solid #fde68a;border-radius:16px;padding:20px;transition:transform .15s,box-shadow .15s;" onmouseenter="this.style.transform='translateY(-2px)';this.style.boxShadow='0 8px 24px rgba(0,0,0,0.08)'" onmouseleave="this.style.transform='';this.style.boxShadow=''">
-        <div style="font-size:10px;font-weight:800;text-transform:uppercase;letter-spacing:.12em;color:#d97706;margin-bottom:10px;">Stipendio stimato</div>
-        <div style="font-family:'Sora';font-size:28px;font-weight:800;letter-spacing:-0.04em;color:#92400e;line-height:1;">${fmt(stipendio)}</div>
-        <div style="margin-top:10px;padding-top:10px;border-top:1px solid #fde68a;display:flex;justify-content:space-between;align-items:center;">
-          <div style="font-size:11px;font-weight:700;color:#d97706;">Clienti attivi × quota</div>
-          <div style="font-size:10px;color:#9ca3af;font-weight:700;">↗</div>
-        </div>
+      <div class="kpi-card" style="border-left:3px solid var(--amber);cursor:pointer;" onclick="window.render('taxes')">
+        <div class="kpi-label">Stipendio stimato</div>
+        <div class="kpi-val">${fmt(stipendio)}</div>
+        <div class="kpi-delta">Clienti attivi × quota</div>
       </div>
     </div>
 
-    <!-- Bottom: grafico + pannello destro -->
+    <!-- Two columns: grafico + insoluti -->
     <div style="display:grid;grid-template-columns:1fr 340px;gap:16px;">
-
       <!-- Grafico entrate/uscite -->
-      <div style="background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:24px;">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+      <div class="card" style="padding:20px;">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
           <div>
-            <div style="font-size:13px;font-weight:800;color:#111;letter-spacing:-0.01em;">Entrate vs Uscite</div>
-            <div style="font-size:11px;color:#9ca3af;font-weight:600;margin-top:2px;">Ultimi 6 mesi</div>
-            <div style="display:flex;gap:12px;margin-top:8px;">
-              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#9ca3af;">
-                <span style="width:10px;height:10px;border-radius:3px;background:#10b981;display:inline-block;"></span>Entrate
+            <div class="card-title">Entrate vs uscite — ultimi 6 mesi</div>
+            <div style="display:flex;gap:14px;margin-top:6px;">
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
+                <span style="width:8px;height:8px;border-radius:2px;background:var(--green);display:inline-block;"></span>Entrate
               </div>
-              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:700;color:#9ca3af;">
-                <span style="width:10px;height:10px;border-radius:3px;background:#f87171;display:inline-block;"></span>Uscite
+              <div style="display:flex;align-items:center;gap:5px;font-size:11px;font-weight:800;color:var(--muted);">
+                <span style="width:8px;height:8px;border-radius:2px;background:var(--red);display:inline-block;"></span>Uscite
               </div>
             </div>
           </div>
-          <div style="text-align:right;background:${net>=0?'#f0fdf4':'#fff1f2'};border-radius:12px;padding:10px 14px;">
-            <div style="font-size:9px;font-weight:800;color:${net>=0?'#16a34a':'#dc2626'};text-transform:uppercase;letter-spacing:.1em;">Saldo mese</div>
-            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:${net>=0?'#15803d':'#b91c1c'};margin-top:2px;">${fmt(net)}</div>
+          <div style="text-align:right;">
+            <div style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.08em;">Questo mese</div>
+            <div style="font-family:'Sora';font-size:22px;font-weight:800;color:${net>=0?'var(--green)':'var(--red)'};">${fmt(net)}</div>
           </div>
         </div>
-        <div style="display:flex;align-items:flex-end;gap:6px;height:90px;">
+        <div style="display:flex;align-items:flex-end;gap:8px;padding-top:8px;">
           ${renderMonthlyChart(month,year)}
         </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;margin-top:20px;padding-top:16px;border-top:1px solid rgba(0,0,0,0.05);">
-          <div style="padding-right:16px;border-right:1px solid rgba(0,0,0,0.05);">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:4px;">Entrate</div>
-            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:#059669;">${fmt(inc)}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:16px;padding-top:16px;border-top:1px solid rgba(0,0,0,0.06);">
+          <div>
+            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Entrate</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--green);">${fmt(inc)}</div>
           </div>
-          <div style="padding:0 16px;border-right:1px solid rgba(0,0,0,0.05);">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:4px;">Uscite</div>
-            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:#dc2626;">−${fmt(exp)}</div>
+          <div>
+            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Uscite</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:var(--red);">-${fmt(exp)}</div>
           </div>
-          <div style="padding-left:16px;">
-            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:4px;">Saldo</div>
-            <div style="font-family:'Sora';font-size:20px;font-weight:800;color:${net>=0?'#059669':'#dc2626'};">${fmt(net)}</div>
+          <div>
+            <div style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:3px;">Saldo</div>
+            <div style="font-family:'Sora';font-size:18px;font-weight:800;color:${net>=0?'#000':'var(--red)'};">${fmt(net)}</div>
           </div>
         </div>
       </div>
 
-      <!-- Colonna destra -->
-      <div style="display:flex;flex-direction:column;gap:14px;">
-
-        <!-- Ultimi movimenti -->
-        <div style="background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;flex:1;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <div style="font-size:13px;font-weight:800;color:#111;">Ultimi movimenti</div>
-            <button onclick="window.render('movements')" style="font-size:11px;font-weight:700;color:#6b7280;background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:6px;transition:background .1s;" onmouseenter="this.style.background='#f3f4f6'" onmouseleave="this.style.background='none'">Vedi tutti →</button>
-          </div>
-          ${recentHtml}
+      <!-- Insoluti clienti -->
+      <div class="card" style="padding:20px;display:flex;flex-direction:column;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <div class="card-title" style="margin-bottom:0;">Clienti che devono pagare</div>
+          <button class="btn-ghost" style="font-size:11px;padding:5px 10px;" onclick="window.render('clients')">Vedi tutti</button>
         </div>
-
-        <!-- Insoluti clienti -->
-        <div style="background:#fff;border:1.5px solid rgba(0,0,0,0.08);border-radius:16px;padding:20px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">
-            <div style="font-size:13px;font-weight:800;color:#111;">Da incassare</div>
-            <button onclick="window.render('clients')" style="font-size:11px;font-weight:700;color:#6b7280;background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:6px;transition:background .1s;" onmouseenter="this.style.background='#f3f4f6'" onmouseleave="this.style.background='none'">Vedi tutti →</button>
-          </div>
+        <div class="tx-list" style="flex:1;">
           ${renderOutstandingPayments()}
         </div>
-
       </div>
     </div>
+    ${state.filters.period==='annual'||state.filters.period==='range'?renderAnnualComparison(year):renderMonthComparison(month,year)}
   </div>`;
 };
+
 // ═══════════════════════════════════════════════════
 // NICO VIEW
 // ═══════════════════════════════════════════════════
@@ -736,7 +845,13 @@ const renderNicoView = (slot) => {
         </div>
       </div>
     </div>
+    <div id="nico-cmp" style="margin-top:16px;"></div>
   </div>`;
+  const cmpSlot = document.getElementById('nico-cmp');
+  if(cmpSlot){
+    if(state.filters.period==='annual'||state.filters.period==='range') cmpSlot.innerHTML=renderAnnualComparison(year);
+    else cmpSlot.innerHTML=renderMonthComparison(month,year);
+  }
   setTimeout(()=>{ initWealthPie(); initEvolutionChart(); },100);
 };
 
@@ -777,6 +892,7 @@ const renderNicoIncomesView = (slot) => {
         </div>
       </div>
     </div>
+    <div style="margin-top:16px;">${renderMonthComparison(month,year)}</div>
   </div>`;
 };
 
@@ -978,10 +1094,16 @@ const renderInvestDetail = (slot) => {
             <div class="kpi-card" style="flex:1;"><div class="kpi-label">Rendimento Totale</div><div style="font-family:'Sora';font-size:16px;font-weight:800;color:${gainAllTime>=0?'var(--green)':'var(--red)'};">${pct(pctAllTime)} (${fmt(gainAllTime)})</div></div>
           </div>
         </div>
+        <div id="asset-cmp"></div>
       </div>
     </div>
   </div>`;
-  setTimeout(()=>initInvestHistoryChart(inv.id),100);
+  // inject asset comparison
+  setTimeout(()=>{
+    initInvestHistoryChart(inv.id);
+    const aslot = document.getElementById('asset-cmp');
+    if(aslot) aslot.innerHTML = renderAssetComparison(inv);
+  },100);
 };
 
 // MOVEMENTS VIEW (con filtri)
@@ -2101,7 +2223,9 @@ window.disablePac = id => {
 // GLOBAL HELPERS
 // ═══════════════════════════════════════════════════
 window.updateFilter = (key,val) => {
-  state.filters[key]=parseInt(val);saveState();render(lastViewId);
+  if(key==='compareYear') state.filters[key] = val ? parseInt(val) : null;
+  else state.filters[key]=parseInt(val);
+  saveState();render(lastViewId);
 };
 window.updatePeriodType = type => {
   state.filters.period=type;

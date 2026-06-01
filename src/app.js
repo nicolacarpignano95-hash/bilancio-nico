@@ -595,16 +595,6 @@ const renderPeriodSelectors = (pageLabel='') => {
 // ═══════════════════════════════════════════════════
 // HOME VIEW
 // ═══════════════════════════════════════════════════
-const renderOutstandingPayments = () => {
-  const allMissing=state.clients.filter(c=>c.active&&calcClientStatus(c.id).missing>0);
-  if(!allMissing.length) return `<div class="empty" style="padding:20px;">Nessun insoluto ✨</div>`;
-  return allMissing.slice(0,6).map(c=>`
-    <div class="tx-item" onclick="window.openClientDetail('${c.id}')">
-      <div class="tx-dot" style="background:var(--amber)"></div>
-      <div class="tx-info"><div class="tx-label">${esc(c.name)}</div></div>
-      <div class="tx-amount neg">${fmt(calcClientStatus(c.id).missing)}</div>
-    </div>`).join('');
-};
 
 const renderOutstandingPayments = () => {
   const allMissing=state.clients.filter(c=>c.active&&calcClientStatus(c.id).missing>0.01);

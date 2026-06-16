@@ -47,6 +47,9 @@ let state = {
 const MONTHS   = ['Gennaio','Febbraio','Marzo','Aprile','Maggio','Giugno','Luglio','Agosto','Settembre','Ottobre','Novembre','Dicembre','Annuale'];
 const MS_ABBR  = ['Gen','Feb','Mar','Apr','Mag','Giu','Lug','Ago','Set','Ott','Nov','Dic'];
 
+const app            = document.getElementById('app');
+const modalContainer = document.getElementById('modal-container');
+
 // ═══════════════════════════════════════════════════
 // UTILS
 // ═══════════════════════════════════════════════════
@@ -663,6 +666,8 @@ const renderTopBar = (viewId, pageLabel) => {
     '</div>'+
   '</div>';
 };
+
+let lastViewId = 'home';
 
 const render = (viewId='home') => {
   lastViewId = viewId;
